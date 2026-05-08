@@ -222,7 +222,6 @@ void ui_com::draw_fric_state()
         {
             cross_line = true;
         }
-
         _drv->draw_circle("FRC", ui_operate::MODIFY, cfg_fric::layer,
                         circle_color, 3, cfg_fric::x, cfg_fric::y,
                         cfg_fric::r)
