@@ -73,5 +73,6 @@ class ui_com
 };
 
 } // namespace pyro
+
 static constexpr float sqrt__2 = 0.707f;//二分之根号2
 #endif // PYRO_UI_COM_H
