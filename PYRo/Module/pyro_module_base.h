@@ -83,7 +83,7 @@ class module_base_t
 
 
     [[nodiscard]] mutex_t &get_mutex();
-    [[nodiscard]] ModuleCtx &get_ctx();
+    [[nodiscard]] const ModuleCtx &get_ctx() const;
 
   protected:
     explicit module_base_t(

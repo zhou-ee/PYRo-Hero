@@ -86,8 +86,8 @@ mutex_t &module_base_t<Derived, ModuleParams>::get_mutex()
 }
 
 template <typename Derived, typename ModuleParams>
-typename module_base_t<Derived, ModuleParams>::ModuleCtx &
-module_base_t<Derived, ModuleParams>::get_ctx()
+const typename module_base_t<Derived, ModuleParams>::ModuleCtx &
+module_base_t<Derived, ModuleParams>::get_ctx() const
 {
     return _ctx;
 }
