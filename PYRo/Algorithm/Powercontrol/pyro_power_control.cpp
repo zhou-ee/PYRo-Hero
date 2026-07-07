@@ -29,8 +29,8 @@ power_controller_t::register_motor(const power_fit_params_t &params)
 }
 
 void power_controller_t::config_buffer_loop(const float safe_energy,
-                                           const float kp, const float ki,
-                                           const float kd)
+                                            const float kp, const float ki,
+                                            const float kd)
 {
     _safe_energy_ref = safe_energy;
     _buffer_pid.set_gains(kp, ki, kd);
@@ -73,7 +73,7 @@ void power_controller_t::solve(const float referee_power_limit,
 
     // [核心解耦] 最终总动态功率限制 = 裁判系统允许功率 + 电容端提供的额外功率
     float dyn_limit = referee_dyn_limit + cap_extra_power;
-    dyn_limit = std::max(dyn_limit, 0.0f); // 兜底保护，总功率不为负
+    dyn_limit       = std::max(dyn_limit, 0.0f); // 兜底保护，总功率不为负
 
     // 2. 遍历内部节点，计算预测功率与二次方程系数
     float A = 0.0f, B = 0.0f, C = 0.0f;
@@ -89,22 +89,36 @@ void power_controller_t::solve(const float referee_power_limit,
         const float temp_factor = std::max(
             1.0f + m->params.alpha * (m->temp - TEMP_OFFSET), MIN_TEMP_FACTOR);
 
-        // 二次项 A (铜损)
-        const float a_i =
-            m->params.k2 * temp_factor * m->target_cmd * m->target_cmd;
-        A += a_i;
+        const float k2_t     = m->params.k2 * temp_factor;
+        const float k1_t     = m->params.k1 * m->rpm;
 
-        // 一次项 B (机械功，不考虑动能回收)
-        const float p_mech = m->params.k1 * m->target_cmd * m->rpm;
-        const float b_i    = (p_mech > 0.0f) ? p_mech : 0.0f;
-        B += b_i;
+        // 铜损: k2_t * (u + k * t)^2 =
+        // (k2_t * t^2) * k^2 + (2 * k2_t * u * t) * k + (k2_t * u^2)
+        const float a_copper = k2_t * m->target_cmd * m->target_cmd;
+        const float b_copper =
+            2.0f * k2_t * m->uncontrolled_cmd * m->target_cmd;
+        const float c_copper = k2_t * m->uncontrolled_cmd * m->uncontrolled_cmd;
 
-        // 常数项 C (铁耗、粘滞与库仑摩擦、静态功耗)
-        const float c_i = m->params.k3 * m->rpm * m->rpm +
-                          m->params.k4 * std::abs(m->rpm) + m->params.k5;
-        C += c_i;
+        A += a_copper;
+        B += b_copper;
+        C += c_copper;
 
-        m->power_predict = a_i + b_i + c_i;
+        // 机械功: (k1_t * t) * k + (k1_t * u)
+        const float p_mech_ctrl = k1_t * m->target_cmd;
+        const float b_mech      = (p_mech_ctrl > 0.0f) ? p_mech_ctrl : 0.0f;
+        B += b_mech;
+
+        const float p_mech_unctrl = k1_t * m->uncontrolled_cmd;
+        const float c_mech = (p_mech_unctrl > 0.0f) ? p_mech_unctrl : 0.0f;
+        C += c_mech;
+
+        // 固有常数损耗 (铁损、摩擦力矩、静态基础功耗)
+        const float c_static = m->params.k3 * m->rpm * m->rpm +
+                               m->params.k4 * std::abs(m->rpm) + m->params.k5;
+        C += c_static;
+
+        m->power_predict =
+            a_copper + b_copper + c_copper + b_mech + c_mech + c_static;
         _last_total_predict += m->power_predict;
     }
 
@@ -115,7 +129,7 @@ void power_controller_t::solve(const float referee_power_limit,
         const float c_term = C - dyn_limit;
         if (c_term > 0.0f)
         {
-            k = 0.0f; // 仅常数耗电就已超标，完全切断扭矩
+            k = 0.0f; // 仅免控/常数功耗就已超标，完全切断受控扭矩
         }
         else
         {
@@ -133,17 +147,17 @@ void power_controller_t::solve(const float referee_power_limit,
         k = std::clamp(k, 0.0f, 1.0f);
     }
 
-    // 4. 更新安全指令并作一阶低通滤波防抖
+    // 4. 更新安全指令，仅对受控扭矩做低通滤波，平衡免控扭矩直出
     for (size_t i = 0; i < _registered_count; ++i)
     {
         power_node_t *m = &_nodes[i];
         if (!m->is_active)
             continue;
 
-        const float target_cmd = m->target_cmd * k;
-        m->safe_cmd =
-            FILTER_ALPHA * target_cmd + (1.0f - FILTER_ALPHA) * m->last_cmd;
-        m->last_cmd = m->safe_cmd;
+        const float target_ctrl_cmd = m->target_cmd * k;
+        m->last_controlled_cmd      = FILTER_ALPHA * target_ctrl_cmd +
+                                 (1.0f - FILTER_ALPHA) * m->last_controlled_cmd;
+        m->safe_cmd = m->last_controlled_cmd + m->uncontrolled_cmd;
     }
 }
 

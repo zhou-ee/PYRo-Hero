@@ -1,6 +1,6 @@
 /**
  * @file: pyro_power_control.h
- * @brief: 功率控制驱动头文件（终极灰盒拟合版 + 代理节点架构 - 解耦版）
+ * @brief: 功率控制驱动头文件
  */
 #ifndef __PYRO_POWER_CONTROL_H__
 #define __PYRO_POWER_CONTROL_H__
@@ -32,16 +32,17 @@ struct power_fit_params_t
 struct power_node_t
 {
     // --- Input ---
-    float target_cmd{0.0f}; ///< 期望下发的原始指令 (如 -16384 ~ 16384)
-    float rpm{0.0f};        ///< 当前电机反馈转速 (如 RPM)
-    float temp{20.0f};      ///< 当前电机温度 (℃)
+    float target_cmd{0.0f};       ///< 期望下发的受控原始指令
+    float uncontrolled_cmd{0.0f}; ///< 免控原始指令 (无需忽略即可)
+    float rpm{0.0f};              ///< 当前电机反馈转速 (如 RPM)
+    float temp{20.0f};            ///< 当前电机温度 (℃)
 
     // --- Output ---
     float safe_cmd{0.0f};      ///< 限制后的安全指令
     float power_predict{0.0f}; ///< 当前节点预测耗电功率 (W)
 
     // --- Internal ---
-    float last_cmd{0.0f};
+    float last_controlled_cmd{0.0f}; ///< 上一次受控部分的滤波扭矩
     power_fit_params_t params{};
     bool is_active{false};
 };
