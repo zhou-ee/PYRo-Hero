@@ -89,7 +89,6 @@ TickType_t can_msg_buffer_t::get_last_update_time() const
 __attribute__((section(".itcm_text"))) void
 can_msg_buffer_t::update_data(const uint8_t *data)
 {
-    // [中断安全] 使用带 FROM_ISR 后缀的临界区宏
     const UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
 
     memcpy(_buffer.data(), data, 8);
@@ -101,7 +100,6 @@ can_msg_buffer_t::update_data(const uint8_t *data)
 
 bool can_msg_buffer_t::get_data(std::array<uint8_t, 8> &data) const
 {
-    // [任务安全] 防止在读取时被 CAN 接收中断打断导致脏数据
     taskENTER_CRITICAL();
     memcpy(data.data(), _buffer.data(), 8);
     const bool fresh_status = _is_fresh;
@@ -116,11 +114,21 @@ bool can_msg_buffer_t::get_data(std::array<uint8_t, 8> &data) const
 can_drv_t::can_drv_t(FDCAN_HandleTypeDef *hfdcan) : _hfdcan(hfdcan)
 {
     _registerlist.clear();
+    can_map()[hfdcan] = this;
 }
 
-can_drv_t::~can_drv_t() = default;
+can_drv_t::~can_drv_t()
+{
+    can_map().erase(_hfdcan);
+}
 
-pyro::status_t can_drv_t::init()
+map_t<FDCAN_HandleTypeDef *, can_drv_t *> &can_drv_t::can_map()
+{
+    static map_t<FDCAN_HandleTypeDef *, can_drv_t *> instance;
+    return instance;
+}
+
+pyro::status_t can_drv_t::init() const
 {
     FDCAN_FilterTypeDef fdcan_filter;
     fdcan_filter.IdType       = FDCAN_STANDARD_ID;
@@ -137,9 +145,6 @@ pyro::status_t can_drv_t::init()
                                      FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE))
         return pyro::PYRO_ERROR;
     if (HAL_OK != HAL_FDCAN_ConfigFifoWatermark(_hfdcan, FDCAN_CFG_RX_FIFO0, 1))
-        return pyro::PYRO_ERROR;
-    if (pyro::PYRO_OK !=
-        pyro::can_hub_t::get_instance()->hub_register_can_obj(_hfdcan, this))
         return pyro::PYRO_ERROR;
 
     return pyro::PYRO_OK;
@@ -237,82 +242,6 @@ can_drv_t::handle_rx_msg(const uint32_t id, const uint8_t *data)
     return pyro::PYRO_OK;
 }
 
-// ==========================================
-// can_hub_t Implementation
-// ==========================================
-can_hub_t::can_hub_t() : _can_drv_map()
-{
-    this->_can_drv_map.clear();
-}
-
-can_hub_t *can_hub_t::get_instance()
-{
-    // [C++11] 局部静态变量初始化天生线程安全，杜绝内存泄漏
-    static can_hub_t instance;
-    return &instance;
-}
-
-pyro::status_t can_hub_t::hub_register_can_obj(FDCAN_HandleTypeDef *hfdcan,
-                                               can_drv_t *can_drv)
-{
-    taskENTER_CRITICAL();
-    if (this->_can_drv_map.exist(hfdcan))
-    {
-        taskEXIT_CRITICAL();
-        return PYRO_ERROR;
-    }
-    this->_can_drv_map[hfdcan] = can_drv;
-    taskEXIT_CRITICAL();
-
-    return pyro::PYRO_OK;
-}
-
-pyro::status_t can_hub_t::hub_unregister_can_obj(FDCAN_HandleTypeDef *hfdcan)
-{
-    taskENTER_CRITICAL();
-    if (!this->_can_drv_map.exist(hfdcan))
-    {
-        taskEXIT_CRITICAL();
-        return pyro::PYRO_ERROR;
-    }
-    this->_can_drv_map.erase(hfdcan);
-    taskEXIT_CRITICAL();
-
-    return pyro::PYRO_OK;
-}
-
-can_drv_t *can_hub_t::hub_get_can_obj(const which_can which_can)
-{
-    FDCAN_HandleTypeDef *hfdcan = nullptr;
-    switch (which_can)
-    {
-        case can1:
-            hfdcan = &hfdcan1;
-            break;
-        case can2:
-            hfdcan = &hfdcan2;
-            break;
-        case can3:
-            hfdcan = &hfdcan3;
-            break;
-        default:
-            return nullptr;
-    }
-
-    can_drv_t *can_drv = this->_can_drv_map[hfdcan];
-    return can_drv;
-}
-
-__attribute__((section(".itcm_text"))) pyro::status_t
-can_hub_t::hub_handle_callback(FDCAN_HandleTypeDef *hfdcan,
-                               const uint32_t identifier, const uint8_t *data)
-{
-    if (!this->_can_drv_map.exist(hfdcan))
-        return pyro::PYRO_ERROR;
-
-    return this->_can_drv_map[hfdcan]->handle_rx_msg(identifier, data);
-}
-
 }; // namespace pyro
 
 // ==========================================
@@ -322,14 +251,16 @@ __attribute__((section(".itcm_text"))) void
 can_global_handle(FDCAN_HandleTypeDef *hfdcan, const uint32_t identifier,
                   const uint8_t *data)
 {
-    pyro::can_hub_t::get_instance()->hub_handle_callback(hfdcan, identifier,
-                                                         data);
+    auto &map = pyro::can_drv_t::can_map();
+    if (map.exist(hfdcan))
+    {
+        (void)map[hfdcan]->handle_rx_msg(identifier, data);
+    }
 }
 
 extern "C" __attribute__((section(".itcm_text"))) void
 HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-    // [修复安全隐患] rx_header 作为局部变量分配在栈上，防止中断嵌套/并发覆盖
     FDCAN_RxHeaderTypeDef rx_header;
     uint8_t data[8];
 

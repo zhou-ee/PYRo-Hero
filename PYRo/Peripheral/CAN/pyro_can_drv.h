@@ -1,13 +1,13 @@
 #ifndef CAN_DRV_H
 #define CAN_DRV_H
 
-#include "fdcan.h"
+#include <array>
+#include <cstdint>
 #include "pyro_core_def.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include <array>
-#include <cmsis_os.h>
-
+#include "cmsis_os.h"
+#include "fdcan.h"
 #include "map.h"
 
 namespace pyro
@@ -32,52 +32,32 @@ private:
     volatile TickType_t _last_update_time;
 };
 
+class bsp_can;
+
 class can_drv_t
 {
+    friend class bsp_can;
     const uint8_t MAX_ID_REGIST_NUM = 32;
     using can_id_regist_t           = uint16_t;
 
 public:
-    explicit can_drv_t(FDCAN_HandleTypeDef *hfdcan);
     ~can_drv_t();
 
-    status_t init();
+    status_t init() const;
     status_t start() const;
     status_t send_msg(uint32_t id, const uint8_t *data) const;
     status_t register_rx_msg(can_msg_buffer_t *msg_buffer);
     status_t handle_rx_msg(uint32_t id, const uint8_t *data);
 
+    static map_t<FDCAN_HandleTypeDef *, can_drv_t *> &can_map();
+
 private:
+    explicit can_drv_t(FDCAN_HandleTypeDef *hfdcan);
+
     FDCAN_HandleTypeDef *_hfdcan;
     map_t<uint32_t, can_msg_buffer_t *> _registerlist;
 };
 
-class can_hub_t
-{
-public:
-    enum which_can
-    {
-        can1,
-        can2,
-        can3
-    };
-
-    static can_hub_t *get_instance();
-
-    status_t hub_register_can_obj(FDCAN_HandleTypeDef *hfdcan,
-                                  can_drv_t *can_drv);
-    status_t hub_unregister_can_obj(FDCAN_HandleTypeDef *hfdcan);
-    can_drv_t *hub_get_can_obj(which_can which_can);
-    status_t hub_handle_callback(FDCAN_HandleTypeDef *hfdcan,
-                                 uint32_t identifier, const uint8_t *data);
-
-private:
-    can_hub_t();
-    can_hub_t(const can_hub_t &)            = delete;
-    can_hub_t &operator=(const can_hub_t &) = delete;
-
-    map_t<FDCAN_HandleTypeDef *, can_drv_t *> _can_drv_map;
-};
 }
 
 #endif
