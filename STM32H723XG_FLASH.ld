@@ -1,23 +1,22 @@
 /*
 ******************************************************************************
 **
-
-**  File        : LinkerScript.ld
+** File        : LinkerScript.ld
 **
-**  Author		: STM32CubeMX
+** Author		: STM32CubeMX
 **
-**  Abstract    : Linker script for STM32H723VGTx series
-**                1024Kbytes FLASH and 560Kbytes RAM
+** Abstract    : Linker script for STM32H723VGTx series
+** 1024Kbytes FLASH and 560Kbytes RAM
 **
-**                Set heap size, stack size and stack location according
-**                to application requirements.
+** Set heap size, stack size and stack location according
+** to application requirements.
 **
-**                Set memory bank area and size if external memory is used.
+** Set memory bank area and size if external memory is used.
 **
-**  Target      : STMicroelectronics STM32
+** Target      : STMicroelectronics STM32
 **
-**  Distribution: The file is distributed “as is,” without any warranty
-**                of any kind.
+** Distribution: The file is distributed “as is,” without any warranty
+** of any kind.
 **
 *****************************************************************************
 ** @attention
@@ -26,19 +25,20 @@
 **
 ** Redistribution and use in source and binary forms, with or without modification,
 ** are permitted provided that the following conditions are met:
-**   1. Redistributions of source code must retain the above copyright notice,
-**      this list of conditions and the following disclaimer.
-**   2. Redistributions in binary form must reproduce the above copyright notice,
-**      this list of conditions and the following disclaimer in the documentation
-**      and/or other materials provided with the distribution.
-**   3. Neither the name of STMicroelectronics nor the names of its contributors
-**      may be used to endorse or promote products derived from this software
-**      without specific prior written permission.
+** 1. Redistributions of source code must retain the above copyright notice,
+** this list of conditions and the following disclaimer.
+** 2. Redistributions in binary form must reproduce the above copyright notice,
+** this list of conditions and the following disclaimer in the documentation
+** and/or other materials provided with the distribution.
+** 3. Neither the name of STMicroelectronics nor the names of its contributors
+** may be used to endorse or promote products derived from this software
+** without specific prior written permission.
 **
 ** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 ** AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 ** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-** DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+** DISCLAIMED.
+** IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
 ** FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
 ** DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
 ** SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
@@ -64,9 +64,11 @@ FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 1024K
 }
 
 /* Highest address of the user mode stack */
-_estack = ORIGIN(DTCMRAM) + LENGTH(DTCMRAM);    /* end of RAM */
+_estack = ORIGIN(DTCMRAM) + LENGTH(DTCMRAM);
+/* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
-_Min_Heap_Size = 0x200;      /* required amount of heap  */
+_Min_Heap_Size = 0x200;
+/* required amount of heap  */
 _Min_Stack_Size = 0x400; /* required amount of stack */
 
 /* Define output sections */
@@ -151,9 +153,27 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
+  /* ===================================================================== */
+  /* [添加] 自定义 ITCM 代码段：运行在 ITCMRAM，存储在 FLASH */
+  /* ===================================================================== */
+  .itcm_text :
+  {
+    . = ALIGN(4);
+    _sitcm_text = .;        /* 记录 ITCM 运行区的起始地址 */
+
+    *(.itcm_text)           /* 匹配 C 代码中带此属性的函数 */
+    *(.itcm_text*)
+
+    . = ALIGN(4);
+    _eitcm_text = .;        /* 记录 ITCM 运行区的结束地址 */
+  } >ITCMRAM AT> FLASH
+
+  /* 记录这块代码在 Flash 中的真实加载地址，供 main.c 搬运使用 */
+  _siitcm_text = LOADADDR(.itcm_text);
+  /* ===================================================================== */
+
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
-
   /* Initialized data sections goes into RAM, load LMA copy after code */
   .data :
   {
@@ -179,7 +199,6 @@ SECTIONS
 
   PROVIDE( __tdata_start = ADDR(.tdata) );
   PROVIDE( __tdata_size = __tdata_end - __tdata_start );
-
   PROVIDE( __data_start = ADDR(.data) );
   PROVIDE( __data_size = __data_end - __data_start );
 
@@ -194,7 +213,8 @@ SECTIONS
   .tbss (NOLOAD) : ALIGN(4)
   {
      /* This is used by the startup in order to initialize the .bss secion */
-    _sbss = .;         /* define a global symbol at bss start */
+    _sbss = .;
+    /* define a global symbol at bss start */
     __bss_start__ = _sbss;
     *(.tbss .tbss.*)
     . = ALIGN(4);
@@ -222,7 +242,7 @@ SECTIONS
       . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
-      PROVIDE( __bss_end = .);
+    PROVIDE( __bss_end = .);
   } >DTCMRAM
   PROVIDE( __non_tls_bss_start = ADDR(.bss) );
 

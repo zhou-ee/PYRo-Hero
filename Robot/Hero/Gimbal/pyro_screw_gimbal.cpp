@@ -1,6 +1,6 @@
 #include "pyro_screw_gimbal.h"
 #include "pyro_ins.h"
-#include "pyro_com_canrx.h"
+#include "pyro_board_drv.h"
 #include "pyro_algo_common.h"
 #include "pyro_dwt_drv.h"
 #include "screw_config.h"
@@ -23,8 +23,6 @@ status_t screw_gimbal_t::_init()
     _ctx.motor = _module_deps.motor_deps;
     _ctx.pid   = _module_deps.pid_deps;
 
-    // 只保留解算需要的底盘四元数订阅
-    pyro::can_rx_drv_t::subscribe(can_hub_t::which_can::can1, 0x103);
     return PYRO_OK;
 }
 
@@ -60,9 +58,11 @@ void screw_gimbal_t::_update_feedback()
         _ctx.motor.yaw->get_current_position() - YAW_OFFSET_RAD;
     _ctx.data.relative_yaw_motor_rad =
         loop_fp32_constrain(current_angle, -PI, PI);
+    _ctx.data.relative_yaw_motor_wrapped_rad =
+        _ctx.data.relative_yaw_motor_rad;
     _ctx.data.relative_yaw_motor_radps = _ctx.motor.yaw->get_current_rotate();
 
-    // 读取 IMU 数据作为云台姿态反馈
+    // 读取 IMU 数据
     ins_drv_t::get_instance()->get_rads_n(&_ctx.data.yaw_imu_rad,
                                           &_ctx.data.pitch_imu_rad,
                                           &_ctx.data.roll_imu_rad);
@@ -82,35 +82,121 @@ void screw_gimbal_t::_update_feedback()
     _calculate_relative_angles();
 
     // =========================================================
-    // 基于电机多圈角度解算 Pitch 实际姿态，存入专属变量供闭环使用
+    // 集中式非线性解算与缓存 (无参化设计的数据源头)
     // =========================================================
+    // 1. 位置反馈解算
     _ctx.data.current_pitch_motor_rad =
         _motor_rad_to_pitch_rad(_ctx.data.total_pitch_motor_rad);
 
-    _ctx.data.current_pitch_motor_radps =
-        _motor_radps_to_pitch_radps(_ctx.motor.pitch->get_current_rotate(),
-                                    _ctx.data.total_pitch_motor_rad);
+    // 2. 提前计算并缓存雅可比(传动比)
+    // 【关键修改】在自瞄模式下，采用 IMU 解算的 relative_pitch_rad 作为雅可比输入
+    float jacobian_input_rad = (_current_cmd.autoaim_mode) ? _ctx.data.relative_pitch_rad : _ctx.data.current_pitch_motor_rad;
+    _ctx.data.current_jacobian = _get_motor_to_pitch_jacobian(jacobian_input_rad);
+
+    // 3. 速度反馈解算
+    if (std::abs(_ctx.data.current_jacobian) > 0.001f) {
+        _ctx.data.current_pitch_motor_radps =
+            _ctx.motor.pitch->get_current_rotate() / _ctx.data.current_jacobian;
+    } else {
+        _ctx.data.current_pitch_motor_radps = 0.0f;
+    }
+
+    // 4. 动态实时校准 (抗编码器零漂)
+    _handle_dynamic_calibration();
+
+    // =========================================================
+    // 5. LESO 观测器更新 (全时段连续追踪，防止切入时状态突跳)
+    // =========================================================
+    const bool use_sling_leso = _current_cmd.sling_mode;
+    if (use_sling_leso && _ctx.pid.yaw_pos_leso != nullptr &&
+        _ctx.pid.yaw_pos_imu_leso != nullptr)
+    {
+        // 取上一次计算出的最终力矩作为已知控制输入 u
+        float last_yaw_u = _ctx.data.out_yaw_torque;
+        _ctx.pid.yaw_pos_leso->update(_ctx.data.relative_yaw_motor_rad, last_yaw_u);
+        _ctx.pid.yaw_pos_imu_leso->update(_ctx.data.yaw_imu_rad, last_yaw_u);
+        _ctx.data.pos_imu_leso_z1 = _ctx.pid.yaw_pos_imu_leso->get_z(1); // 供调试观察 LESO 内部状态
+        _ctx.data.pos_leso_z0 = _ctx.pid.yaw_pos_leso->get_z(0); // 供调试观察 LESO 内部状态
+        _ctx.data.pos_leso_z1 = _ctx.pid.yaw_pos_leso->get_z(1);
+        _ctx.data.pos_leso_out = - _ctx.pid.yaw_pos_leso->get_z(2) / _ctx.pid.yaw_pos_leso->get_b();
+    }
+    if (use_sling_leso && _ctx.pid.yaw_spd_leso != nullptr)
+    {
+        // 取上一次计算出的最终力矩作为已知控制输入 u
+        float last_yaw_u = _ctx.data.out_yaw_torque;
+        _ctx.pid.yaw_spd_leso->update(_ctx.data.yaw_imu_radps, last_yaw_u);
+        _ctx.data.spd_leso_z0 = _ctx.pid.yaw_spd_leso->get_z(0); // 供调试观察 LESO 内部状态
+    }
+    if (use_sling_leso && _ctx.pid.yaw_spd_imu_leso != nullptr)
+    {
+        float last_yaw_u = _ctx.data.out_yaw_torque;
+        _ctx.pid.yaw_spd_imu_leso->update(_ctx.data.yaw_imu_radps, last_yaw_u);
+        _ctx.data.spd_imu_leso_z0 = _ctx.pid.yaw_spd_imu_leso->get_z(0);
+    }
 }
 
 void screw_gimbal_t::_gimbal_control()
 {
-    // --- Pitch 串级控制 ---
+    // --- Pitch 串级控制 (常规模式基于机械角) ---
     _ctx.data.target_pitch_radps = _ctx.pid.pitch_pos->calculate(
         _ctx.data.target_pitch_rad, _ctx.data.current_pitch_motor_rad);
 
-    float pitch_pid_out = _ctx.pid.pitch_spd->calculate(
+    float pitch_joint_torque = _ctx.pid.pitch_spd->calculate(
         _ctx.data.target_pitch_radps, _ctx.data.current_pitch_motor_radps);
 
-    float pitch_ff_torque = _calculate_pitch_compensation(
-        _ctx.data.current_pitch_motor_rad, _ctx.data.target_pitch_radps);
+    float pitch_pid_motor_torque = 0.0f;
+    if (std::abs(_ctx.data.current_jacobian) > 0.001f) {
+        pitch_pid_motor_torque = pitch_joint_torque / _ctx.data.current_jacobian;
+    }
+
+    // 常规模式，传入 false
+    float pitch_ff_torque = _calculate_pitch_compensation(false);
 
     pitch_ff_torque =
         std::clamp(pitch_ff_torque, -SCREW_MAX_TORQUE, SCREW_MAX_TORQUE);
     float pid_torque_max = SCREW_MAX_TORQUE - pitch_ff_torque;
     float pid_torque_min = -SCREW_MAX_TORQUE - pitch_ff_torque;
 
-    pitch_pid_out = std::clamp(pitch_pid_out, pid_torque_min, pid_torque_max);
-    _ctx.data.out_pitch_torque = pitch_pid_out + pitch_ff_torque;
+    pitch_pid_motor_torque = std::clamp(pitch_pid_motor_torque, pid_torque_min, pid_torque_max);
+
+    _ctx.data.out_pitch_torque = pitch_pid_motor_torque + pitch_ff_torque;
+
+    // --- Yaw 串级控制 (基于 IMU) ---
+    float raw_yaw_error     = _ctx.data.yaw_imu_rad - _ctx.data.target_yaw_rad;
+    _ctx.data.yaw_error_rad = pyro::loop_fp32_constrain(raw_yaw_error, -PI, PI);
+
+    _ctx.data.target_yaw_radps =
+        _ctx.pid.yaw_pos->calculate(0.0f, _ctx.data.yaw_error_rad);
+
+    _ctx.data.out_yaw_torque = _ctx.pid.yaw_spd->calculate(
+        _ctx.data.target_yaw_radps, _ctx.data.yaw_imu_radps);
+}
+
+void screw_gimbal_t::_gimbal_autoaim_control()
+{
+    // --- Pitch 串级控制 (自瞄模式基于绝对 IMU 角度) ---
+    _ctx.data.target_pitch_radps = _ctx.pid.pitch_auto_pos->calculate(
+        _ctx.data.target_pitch_rad, _ctx.data.pitch_imu_rad);
+
+    float pitch_joint_torque = _ctx.pid.pitch_auto_spd->calculate(
+        _ctx.data.target_pitch_radps, _ctx.data.pitch_imu_radps);
+
+    float pitch_pid_motor_torque = 0.0f;
+    if (std::abs(_ctx.data.current_jacobian) > 0.001f) {
+        pitch_pid_motor_torque = pitch_joint_torque / _ctx.data.current_jacobian;
+    }
+
+    // 自瞄模式，传入 true 增大死区抵抗 IMU 高频噪声
+    float pitch_ff_torque = _calculate_pitch_compensation(true);
+
+    pitch_ff_torque =
+        std::clamp(pitch_ff_torque, -SCREW_MAX_TORQUE, SCREW_MAX_TORQUE);
+    float pid_torque_max = SCREW_MAX_TORQUE - pitch_ff_torque;
+    float pid_torque_min = -SCREW_MAX_TORQUE - pitch_ff_torque;
+
+    pitch_pid_motor_torque = std::clamp(pitch_pid_motor_torque, pid_torque_min, pid_torque_max);
+
+    _ctx.data.out_pitch_torque = pitch_pid_motor_torque + pitch_ff_torque;
 
     // --- Yaw 串级控制 (基于 IMU) ---
     float raw_yaw_error     = _ctx.data.yaw_imu_rad - _ctx.data.target_yaw_rad;
@@ -125,101 +211,92 @@ void screw_gimbal_t::_gimbal_control()
 
 void screw_gimbal_t::_gimbal_sling_control()
 {
-    // --- Pitch 串级控制 (Sling模式下与普通模式无异) ---
+    // --- Pitch 串级控制 (Sling模式) ---
     _ctx.data.target_pitch_radps = _ctx.pid.pitch_pos->calculate(
         _ctx.data.target_pitch_rad, _ctx.data.current_pitch_motor_rad);
 
-    float pitch_pid_out = _ctx.pid.pitch_spd->calculate(
+    float pitch_joint_torque = _ctx.pid.pitch_spd->calculate(
         _ctx.data.target_pitch_radps, _ctx.data.current_pitch_motor_radps);
 
-    float pitch_ff_torque = _calculate_pitch_compensation(
-        _ctx.data.current_pitch_motor_rad, _ctx.data.target_pitch_radps);
+    float pitch_pid_motor_torque = 0.0f;
+    if (std::abs(_ctx.data.current_jacobian) > 0.001f) {
+        pitch_pid_motor_torque = pitch_joint_torque / _ctx.data.current_jacobian;
+    }
+
+    // 吊射模式，传入 false
+    float pitch_ff_torque = _calculate_pitch_compensation(false);
 
     pitch_ff_torque =
         std::clamp(pitch_ff_torque, -SCREW_MAX_TORQUE, SCREW_MAX_TORQUE);
     float pid_torque_max = SCREW_MAX_TORQUE - pitch_ff_torque;
     float pid_torque_min = -SCREW_MAX_TORQUE - pitch_ff_torque;
 
-    pitch_pid_out = std::clamp(pitch_pid_out, pid_torque_min, pid_torque_max);
-    _ctx.data.out_pitch_torque = pitch_pid_out + pitch_ff_torque;
+    pitch_pid_motor_torque = std::clamp(pitch_pid_motor_torque, pid_torque_min, pid_torque_max);
+    _ctx.data.out_pitch_torque = pitch_pid_motor_torque + pitch_ff_torque;
 
     // --- Yaw 纯机械相对角控制 (Sling专用) ---
     _ctx.data.relative_yaw_error_rad =
-        _ctx.data.relative_yaw_motor_rad - _ctx.data.target_yaw_rad;
-    // 位置环计算目标相对角速度
+        _ctx.data.relative_yaw_motor_rad- _ctx.data.target_yaw_rad;
+
     _ctx.data.target_yaw_radps =
         _ctx.pid.yaw_relative_pos->calculate(0.0f,_ctx.data.relative_yaw_error_rad);
 
-    // 速度环计算基础输出力矩 (使用电机的实际角速度反馈)
-    // _ctx.data.target_yaw_radps = _ctx.cmd->yaw_delta_angle;
     float yaw_pid_out = _ctx.pid.yaw_relative_spd->calculate(
-        _ctx.data.target_yaw_radps, _ctx.data.relative_yaw_motor_radps);
+        _ctx.data.target_yaw_radps, _ctx.data.spd_imu_leso_z0);
 
-    // ==========================================
-    // 新增：Yaw 轴摩擦力矩前馈补偿
-    // ==========================================
-    float yaw_friction_comp = 0.0f;
-    const float yaw_velocity_deadband = 0.01f; // 速度死区，防止静止时力矩高频反转导致震荡
-
-    // 根据目标角速度的方向决定补偿力矩的符号
-    if (_ctx.data.target_yaw_radps > yaw_velocity_deadband)
+    // 【修改点】：使用 LESO 估计的总扰动进行前馈补偿，替代原先的施密特触发器逻辑
+    float yaw_leso_comp = 0.0f;
+    if (_ctx.pid.yaw_pos_leso != nullptr)
     {
-        yaw_friction_comp = 0.35f;
-    }
-    else if (_ctx.data.target_yaw_radps < -yaw_velocity_deadband)
-    {
-        yaw_friction_comp = -0.35f;
-    }
-    else
-    {
-        yaw_friction_comp = 0.0f;
+        // 获取实时观测出的阻尼与摩擦总扰动
+        float estimated_disturbance = _ctx.pid.yaw_pos_leso->get_disturbance();
+        // 控制律: u = PID_out - z3 / b
+        yaw_leso_comp = -estimated_disturbance / _ctx.pid.yaw_pos_leso->get_b();
     }
 
-    // 最终力矩 = PID输出 + 摩擦力矩补偿
-    // _ctx.data.out_yaw_torque = yaw_pid_out;
-    _ctx.data.out_yaw_torque = yaw_pid_out + yaw_friction_comp;
-
-    _ctx.data.out_yaw_torque = std::clamp(_ctx.data.out_yaw_torque,-3.0f,3.0f);
-    // _ctx.data.out_yaw_torque = yaw_pid_out + yaw_friction_comp;
-    // _ctx.data.out_yaw_torque = yaw_friction_comp;
-    // _ctx.data.out_yaw_torque = yaw_friction_comp;
+    _ctx.data.out_yaw_torque = yaw_pid_out + yaw_leso_comp;
+    // _ctx.data.out_yaw_torque = yaw_leso_comp;
+    // _ctx.data.out_yaw_torque = yaw_pid_out ;
+    _ctx.data.out_yaw_torque = std::clamp(_ctx.data.out_yaw_torque, -YAW_SLING_TORQUE_LIMIT, YAW_SLING_TORQUE_LIMIT);
 }
 
-void screw_gimbal_t::_gimbal_autoaim_control()
+void screw_gimbal_t::_handle_dynamic_calibration()
 {
-    // --- Pitch 串级控制 (基于纯 IMU 数据) ---
-    // 1. 位置环：输入目标 IMU Pitch 和 当前 IMU Pitch
-    _ctx.data.target_pitch_radps = _ctx.pid.pitch_autoaim_pos->calculate(
-        _ctx.data.target_pitch_rad, _ctx.data.pitch_imu_rad);
+    // 如果处于吊射模式或尚未完成初始校准，则直接退出
+    if (!_ctx.data.allow_dynamic_calib || !_ctx.data.has_initial_calibrated) {
+        _dynamic_calib_sum = 0.0f;
+        _dynamic_calib_timer = 0;
+        return;
+    }
 
-    // 2. 速度环：输入目标 IMU Pitch 速度 和 当前 IMU Pitch 速度
-    float pitch_pid_out = _ctx.pid.pitch_autoaim_spd->calculate(
-        _ctx.data.target_pitch_radps, _ctx.data.pitch_imu_radps);
+    // 严格校准条件 (使用配置常量)：
+    const bool condition = (std::abs(_ctx.data.pitch_imu_radps) < CALIB_PITCH_STILL_RADPS) &&
+                           (std::abs(_ctx.data.roll_imu_rad) < CALIB_ROLL_LEVEL_RAD) &&
+                           (std::abs(_ctx.data.current_pitch_motor_rad - _ctx.data.target_pitch_rad) < CALIB_PITCH_ERROR_RAD) &&
+                           (std::abs(_ctx.data.current_pitch_motor_radps) < CALIB_MOTOR_STILL_RADPS);
 
-    // 3. 计算前馈补偿力矩 (基于真实的电机推杆构型)
-    float pitch_ff_torque = _calculate_pitch_compensation(
-        _ctx.data.current_pitch_motor_rad, _ctx.data.target_pitch_radps);
+    if (condition) {
+        _dynamic_calib_timer++;
+        _dynamic_calib_sum += _ctx.data.relative_pitch_rad; // 使用 IMU 四元数解算的相对角作为基准
 
-    pitch_ff_torque =
-        std::clamp(pitch_ff_torque, -SCREW_MAX_TORQUE, SCREW_MAX_TORQUE);
-    float pid_torque_max = SCREW_MAX_TORQUE - pitch_ff_torque;
-    float pid_torque_min = -SCREW_MAX_TORQUE - pitch_ff_torque;
+        if (_dynamic_calib_timer >= DYNAMIC_CALIB_WINDOW_TICKS) {
+            float avg_ref_pitch = _dynamic_calib_sum / static_cast<float>(DYNAMIC_CALIB_WINDOW_TICKS);
+            // 覆写当前电机累计值，消除编码器累积误差，不影响初始限位
+            _ctx.data.total_pitch_motor_rad = _pitch_rad_to_motor_rad(avg_ref_pitch);
+            float current_motor_rad = _motor_rad_to_pitch_rad(_ctx.data.total_pitch_motor_rad);
+            _ctx.data.target_pitch_rad = current_motor_rad - _ctx.data.current_pitch_motor_rad + _ctx.data.target_pitch_rad;
+            _ctx.data.current_pitch_motor_rad = current_motor_rad;
 
-    pitch_pid_out = std::clamp(pitch_pid_out, pid_torque_min, pid_torque_max);
-    _ctx.data.out_pitch_torque = pitch_pid_out + pitch_ff_torque;
-
-    // --- Yaw 串级控制 (与 Normal 模式一致，基于 IMU) ---
-    float raw_yaw_error     = _ctx.data.yaw_imu_rad - _ctx.data.target_yaw_rad;
-    _ctx.data.yaw_error_rad = pyro::loop_fp32_constrain(raw_yaw_error, -PI, PI);
-
-    _ctx.data.target_yaw_radps =
-        _ctx.pid.yaw_pos->calculate(0.0f, _ctx.data.yaw_error_rad);
-
-    _ctx.data.out_yaw_torque = _ctx.pid.yaw_spd->calculate(
-        _ctx.data.target_yaw_radps, _ctx.data.yaw_imu_radps);
+            _dynamic_calib_timer = 0;
+            _dynamic_calib_sum = 0.0f;
+        }
+    } else {
+        _dynamic_calib_timer = 0;
+        _dynamic_calib_sum = 0.0f;
+    }
 }
 
-screw_gimbal_t::gimbal_context_t screw_gimbal_t::get_ctx() const
+screw_gimbal_t::gimbal_context_t& screw_gimbal_t::get_ctx()
 {
     return _ctx;
 }
@@ -232,16 +309,17 @@ void screw_gimbal_t::_send_motor_command(gimbal_context_t *ctx)
 
 void screw_gimbal_t::_communicate_chassis()
 {
-    std::array<uint8_t, 8> raw_data{};
-    if (pyro::can_rx_drv_t::get_data(pyro::can_hub_t::which_can::can1, 0x103,
-                                     raw_data))
+    auto &board_drv = board_drv_t::get_instance(board_drv_t::role_t::GIMBAL, can_hub_t::can1);
+    if (!board_drv.check_online())
     {
-        auto *src              = reinterpret_cast<int16_t *>(raw_data.data());
-        _ctx.data.chassis_q[0] = static_cast<float>(src[0]) / 32767.0f; // q0
-        _ctx.data.chassis_q[1] = static_cast<float>(src[1]) / 32767.0f; // q1
-        _ctx.data.chassis_q[2] = static_cast<float>(src[2]) / 32767.0f; // q2
-        _ctx.data.chassis_q[3] = static_cast<float>(src[3]) / 32767.0f; // q3
+        return;
     }
+
+    const auto &rx_data = board_drv.get_c2g_rx_data();
+    _ctx.data.chassis_q[0] = static_cast<float>(rx_data.chassis_q[0]) / 32767.0f;
+    _ctx.data.chassis_q[1] = static_cast<float>(rx_data.chassis_q[1]) / 32767.0f;
+    _ctx.data.chassis_q[2] = static_cast<float>(rx_data.chassis_q[2]) / 32767.0f;
+    _ctx.data.chassis_q[3] = static_cast<float>(rx_data.chassis_q[3]) / 32767.0f;
 }
 
 void screw_gimbal_t::_calculate_relative_angles()
@@ -252,32 +330,31 @@ void screw_gimbal_t::_calculate_relative_angles()
     const float gw = _ctx.data.gimbal_q[0], gx = _ctx.data.gimbal_q[1],
                 gy = _ctx.data.gimbal_q[2], gz = _ctx.data.gimbal_q[3];
 
-    // 从四元数中反解出两个 IMU 认为的世界 Yaw 角
     const float chassis_yaw_imu = std::atan2(2.0f * (cw * cz + cx * cy),
                                              1.0f - 2.0f * (cy * cy + cz * cz));
     const float gimbal_yaw_imu  = std::atan2(2.0f * (gw * gz + gx * gy),
                                              1.0f - 2.0f * (gy * gy + gz * gz));
 
-    // 赋值供上层动态限幅使用
     _ctx.data.chassis_yaw_imu   = chassis_yaw_imu;
 
-    // 计算当前的坐标系漂移误差 (去除了低通滤波，直接应用)
+    float sinp = 2.0f * (cw * cy - cx * cz);
+    sinp = std::clamp(sinp, -1.0f, 1.0f);
+    _ctx.data.chassis_pitch_rad = std::asin(sinp);
+
     float raw_yaw_error =
-        gimbal_yaw_imu - chassis_yaw_imu - _ctx.data.relative_yaw_motor_rad;
+        gimbal_yaw_imu - chassis_yaw_imu -
+        _ctx.data.relative_yaw_motor_wrapped_rad;
     raw_yaw_error          = pyro::loop_fp32_constrain(raw_yaw_error, -PI, PI);
 
-    // 构造补偿四元数
     const float half_err   = raw_yaw_error * 0.5f;
     const float comp_w     = std::cos(half_err);
     const float comp_z     = std::sin(half_err);
 
-    // 四元数相乘：Q_aligned = Q_comp * Q_chassis
     const float aw         = comp_w * cw - comp_z * cz;
     const float ax         = comp_w * cx - comp_z * cy;
     const float ay         = comp_w * cy + comp_z * cx;
     const float az         = comp_w * cz + comp_z * cw;
 
-    // 矩阵相乘提取相对 Pitch
     const float RcT_row2_0 = 2.0f * (ax * az + aw * ay);
     const float RcT_row2_1 = 2.0f * (ay * az - aw * ax);
     const float RcT_row2_2 = 1.0f - 2.0f * (ax * ax + ay * ay);
@@ -301,13 +378,13 @@ void screw_gimbal_t::_calculate_relative_angles()
 bool screw_gimbal_t::_calibrate_pitch_offset()
 {
     _calib_tick++;
-    if (_calib_tick < 1000)
+    if (_calib_tick < PITCH_CALIB_DELAY_TICKS)
     {
         return false;
     }
     _calib_pitch_sum += _ctx.data.relative_pitch_rad;
 
-    if (_calib_tick >= PITCH_CALIB_MAX_TICKS + 1000)
+    if (_calib_tick >= PITCH_CALIB_MAX_TICKS + PITCH_CALIB_DELAY_TICKS)
     {
         const float avg_relative_pitch =
             _calib_pitch_sum / static_cast<float>(PITCH_CALIB_MAX_TICKS);
@@ -324,6 +401,20 @@ bool screw_gimbal_t::_calibrate_pitch_offset()
         return true;
     }
     return false;
+}
+
+float screw_gimbal_t::_get_motor_to_pitch_jacobian(float pitch_rad) const
+{
+    const float theta_rad = SCREW_THETA_ZERO_RAD + pitch_rad;
+    float current_S = std::sqrt(SCREW_L1_SQ_PLUS_L2_SQ - SCREW_TWO_L1_L2 * std::cos(theta_rad));
+
+    if (current_S < 1.0f)
+        current_S = 1.0f;
+
+    const float dS_dpitch = (SCREW_TWO_L1_L2 * std::sin(theta_rad)) / (2.0f * current_S);
+    const float dMotor_dpitch = dS_dpitch * 2.0f * PI;
+
+    return dMotor_dpitch;
 }
 
 float screw_gimbal_t::_pitch_rad_to_motor_rad(float pitch_rad) const
@@ -350,86 +441,58 @@ float screw_gimbal_t::_motor_rad_to_pitch_rad(float motor_rad) const
     return theta_rad - SCREW_THETA_ZERO_RAD;
 }
 
-float screw_gimbal_t::_pitch_radps_to_motor_radps(float pitch_radps,
-                                                  float current_pitch_rad) const
+float screw_gimbal_t::_calculate_pitch_compensation(bool is_autoaim) const
 {
-    const float theta_rad = SCREW_THETA_ZERO_RAD + current_pitch_rad;
-    float current_S       = std::sqrt(SCREW_L1_SQ_PLUS_L2_SQ -
-                                      SCREW_TWO_L1_L2 * std::cos(theta_rad));
+    static float equivalent_joint_friction = 0.0f;
+    static bool is_init = false;
 
-    if (current_S < 1.0f)
-        current_S = 1.0f;
+    // 新增静态变量用于记录施密特触发器的当前状态方向 (保持迟滞状态)
+    // 1: 正向摩擦力, -1: 反向摩擦力, 0: 无摩擦力
+    static int active_direction = 0;
 
-    const float dS_dpitch =
-        (SCREW_TWO_L1_L2 * std::sin(theta_rad)) / (2.0f * current_S);
-    const float dMotor_dpitch = dS_dpitch * 2.0f * PI;
-
-    return pitch_radps * dMotor_dpitch;
-}
-
-float screw_gimbal_t::_motor_radps_to_pitch_radps(float motor_radps,
-                                                  float current_motor_rad) const
-{
-    const float current_pitch_rad = _motor_rad_to_pitch_rad(current_motor_rad);
-    const float theta_rad         = SCREW_THETA_ZERO_RAD + current_pitch_rad;
-    float current_S               = std::sqrt(SCREW_L1_SQ_PLUS_L2_SQ -
-                                              SCREW_TWO_L1_L2 * std::cos(theta_rad));
-
-    if (current_S < 1.0f)
-        current_S = 1.0f;
-
-    const float dS_dpitch =
-        (SCREW_TWO_L1_L2 * std::sin(theta_rad)) / (2.0f * current_S);
-    const float dMotor_dpitch = dS_dpitch * 2.0f * PI;
-
-    if (std::abs(dMotor_dpitch) < 0.001f)
-        return 0.0f;
-
-    return motor_radps / dMotor_dpitch;
-}
-float screw_gimbal_t::_calculate_pitch_compensation(
-    float current_pitch_rad, float target_pitch_radps) const
-{
-    const float ref_pitch = -0.1f;
-    const float ref_theta = SCREW_THETA_ZERO_RAD + ref_pitch;
-    const float ref_S     = std::sqrt(SCREW_L1_SQ_PLUS_L2_SQ -
-                                      SCREW_TWO_L1_L2 * std::cos(ref_theta));
-    const float ref_dS_dpitch =
-        (SCREW_TWO_L1_L2 * std::sin(ref_theta)) / (2.0f * ref_S);
-    const float ref_dMotor_dpitch   = ref_dS_dpitch * 2.0f * PI;
-
-    const float ref_friction_torque = 3.0f;
-    const float equivalent_joint_friction =
-        ref_friction_torque * ref_dMotor_dpitch;
-
-    const float theta_rad = SCREW_THETA_ZERO_RAD + current_pitch_rad;
-    float current_S       = std::sqrt(SCREW_L1_SQ_PLUS_L2_SQ -
-                                      SCREW_TWO_L1_L2 * std::cos(theta_rad));
-    if (current_S < 1.0f)
-        current_S = 1.0f;
-
-    const float dS_dpitch =
-        (SCREW_TWO_L1_L2 * std::sin(theta_rad)) / (2.0f * current_S);
-    const float current_dMotor_dpitch = dS_dpitch * 2.0f * PI;
-
-    float current_friction_mag        = 0.0f;
-    if (std::abs(current_dMotor_dpitch) > 0.001f)
+    if (!is_init)
     {
-        current_friction_mag =
-            equivalent_joint_friction / current_dMotor_dpitch;
+        const float ref_dMotor_dpitch = _get_motor_to_pitch_jacobian(PITCH_FRICTION_REF_ANGLE_RAD);
+        equivalent_joint_friction = PITCH_FRICTION_REF_TORQUE * ref_dMotor_dpitch;
+        is_init = true;
     }
 
-    float dynamic_friction_comp   = 0.0f;
-    const float velocity_deadband = 0.01f;
+    float current_friction_mag = 2.0f;
+    if (std::abs(_ctx.data.current_jacobian) > 0.001f)
+    {
+        current_friction_mag = equivalent_joint_friction / _ctx.data.current_jacobian;
+    }
 
-    if (target_pitch_radps > velocity_deadband)
+    // 动态速度死区与缓冲区切换
+    float velocity_deadband = is_autoaim ? PITCH_DEADBAND_AUTOAIM_RADPS : PITCH_DEADBAND_NORMAL_RADPS;
+    float velocity_buffer   = is_autoaim ? PITCH_BUFFER_AUTOAIM_RADPS : PITCH_BUFFER_NORMAL_RADPS;
+
+    float target_radps = _ctx.data.target_pitch_radps;
+    float abs_radps = std::abs(target_radps);
+
+    // 施密特触发器阈值
+    float threshold_high = velocity_deadband + velocity_buffer;
+    float threshold_low  = velocity_deadband;
+
+    // 施密特触发器逻辑 (Hysteresis)
+    if (target_radps > threshold_high)
     {
-        dynamic_friction_comp = current_friction_mag;
+        // 向上越过 deadband + buffer，触发正向突变
+        active_direction = 1;
     }
-    else if (target_pitch_radps < -velocity_deadband)
+    else if (target_radps < -threshold_high)
     {
-        dynamic_friction_comp = -current_friction_mag;
+        // 向下越过 -(deadband + buffer)，触发反向突变
+        active_direction = -1;
     }
+    else if (abs_radps < threshold_low)
+    {
+        // 绝对值回落至 deadband 以下，输出清零
+        active_direction = 0;
+    }
+    // else: 如果速度落在 [threshold_low, threshold_high] 的缓冲区内，active_direction 保持上一次的状态不变
+
+    float dynamic_friction_comp = active_direction * current_friction_mag;
 
     return dynamic_friction_comp;
 }

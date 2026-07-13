@@ -170,6 +170,7 @@ void supercap_drv_t::run_loop_impl()
 }
 
 /* ISR Callback --------------------------------------------------------------*/
+__attribute__((section(".itcm_text")))
 bool supercap_drv_t::rx_callback(const uint8_t *p_data, const uint16_t size,
                                  BaseType_t &xHigherPriorityTaskWoken) const
 {

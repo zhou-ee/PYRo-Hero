@@ -15,13 +15,24 @@ void screw_gimbal_t::fsm_active_t::normal_state_t::enter(owner *owner)
     // 清除切入切出时可能残留的 PID 积分，防止由于历史积分导致的猛烈弹跳
     owner->_ctx.pid.yaw_pos->clear();
     owner->_ctx.pid.yaw_spd->clear();
-    owner->_ctx.pid.pitch_pos->clear();
-    owner->_ctx.pid.pitch_spd->clear();
+
+    if (owner->_fsm_active._last_state != &owner->_fsm_active.sling_state)
+    {
+        owner->_ctx.pid.pitch_pos->clear();
+        owner->_ctx.pid.pitch_spd->clear();
+    }
 }
 
 void screw_gimbal_t::fsm_active_t::normal_state_t::execute(owner *owner)
 {
-    owner->_ctx.data.target_pitch_rad += owner->_ctx.cmd->pitch_delta_angle;
+    if (owner->_ctx.cmd->track_en)
+    {
+        owner->_ctx.data.target_pitch_rad = GIMBAL_CROSSING_PITCH_RAD;
+    }
+    else
+    {
+        owner->_ctx.data.target_pitch_rad += owner->_ctx.cmd->pitch_delta_angle;
+    }
     owner->_ctx.data.target_yaw_rad += owner->_ctx.cmd->yaw_delta_angle;
 
     // ==========================================
@@ -39,7 +50,7 @@ void screw_gimbal_t::fsm_active_t::normal_state_t::execute(owner *owner)
     // 底层的 _gimbal_control 算误差时自带了 loop_fp32_constrain，所以步骤 f 给出的数据完全合法
     // ==========================================
     owner->_gimbal_control();
-    screw_gimbal_t::_send_motor_command(&owner->_ctx);
+    _send_motor_command(&owner->_ctx);
 }
 
 void screw_gimbal_t::fsm_active_t::normal_state_t::exit(owner *owner)

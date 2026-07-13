@@ -2,11 +2,26 @@
 #include "pyro_algo_common.h"
 #include <arm_math.h> // 引入 CMSIS-DSP 库
 #include "pyro_dji_motor_drv.h"
-#include "pyro_com_cantx.h"
-#include "pyro_power_control_drv.h"
+#include "pyro_power_control.h"
+#include "pyro_sr04_drv.h"
+#include <algorithm>
+#include "pyro_referee.h"
+#include "pyro_sr05_drv.h"
+#include "pyro_us100_drv.h"
 
 namespace pyro
 {
+
+namespace
+{
+constexpr uint16_t CAP_EXTRA_POWER_ENABLE_CV = 1900;
+constexpr uint16_t CAP_EXTRA_POWER_DISABLE_CV = 1750;
+constexpr float CAP_EXTRA_POWER_W = 100.0f;
+
+constexpr uint32_t SUPERCAP_ENABLE_DELAY_TICKS = 1000;
+constexpr uint32_t SUPERCAP_REFRESH_TICKS = 10;
+constexpr uint32_t SUPERCAP_DISABLE_DEBOUNCE_TICKS = 30;
+} // namespace
 
 // =========================================================
 // 构造与初始化
@@ -22,39 +37,67 @@ status_t hybrid_chassis_t::_init()
     _ctx.motor  = _module_deps.motor_deps;
     _ctx.pid    = _module_deps.pid_deps;
 
-    // 使用 config.h 中的参数初始化运动学模型
-    _kinematics = new hybrid_kin_t(TRACK_SPACING,
-                                   (MEC_FRONT_TRACK_WIDTH + MEC_WHEELBASE) / 2,
-                                   (MEC_FRONT_TRACK_WIDTH + MEC_WHEELBASE) / 2,
-                                   (MEC_REAR_TRACK_WIDTH + MEC_WHEELBASE) / 2,
-                                   (MEC_REAR_TRACK_WIDTH + MEC_WHEELBASE) / 2);
+    // 使用 config.h 中的参数初始化运动学模型xssx
+    _kinematics = new hybrid_kin_t(
+        TRACK_SPACING, MEC_FRONT_TRACK_WIDTH / 2 + MEC_FRONT_WHEELBASE,
+        MEC_FRONT_TRACK_WIDTH / 2 + MEC_FRONT_WHEELBASE,
+        MEC_REAR_TRACK_WIDTH / 2 + MEC_REAR_WHEELBASE,
+        MEC_REAR_TRACK_WIDTH / 2 + MEC_REAR_WHEELBASE);
     // float x = 0.15f;
     // _kinematics = new hybrid_kin_t(TRACK_SPACING,
     //                            0.15f + x,0.15f + x,0.66f - x, 0.66f - x);
 
+    _ctx.powermeter = new powermeter_drv_t(0x212, can_hub_t::can2);
+    _ctx.powermeter->init();
+
+    _power_control_init();
+
     return PYRO_OK;
 }
 
+hybrid_chassis_t::hybrid_context_t &hybrid_chassis_t::get_ctx()
+{
+    return _ctx;
+}
+
+
 void hybrid_chassis_t::_power_control_init()
 {
-    power_control_drv_t::motor_coefficient_t coef[4];
+    power_fit_params_t params;
 
-    for (auto &[k1, k2, k3, k4] : coef)
+    // 麦轮（3508）功控参数
+    // 四组参数取平均后的结果
+    params.k1    = 0.03912453f; // 机械功率项系数
+    params.k2    = 0.06985056f; // 铜损/热损耗系数
+    params.k3    = 0.00001723f; // 高频摩擦系数 (转速平方项)
+    params.k4    = 0.00917522f; // 库仑摩擦系数 (摩擦损耗项)
+    params.k5    = 0.75000000f; // 静态基础功耗 (强制固定)
+    params.alpha = 0.00393f;    // 默认电阻温度系数
+
+    // 注册 4 个麦轮电机
+    for (int i = 0; i < 4; i++)
     {
-        // k1 = 0.0160f;//0.0155//0.0260
-        // k2 = 0.0250f;//1.6000//0.0460
-        // k3 = 0.1742f;//0.0010//0.1066
-        // k4 = 0.5815f;//0.7500//0.7500
-        k1 = 0.0260f; // 0.0155
-        k2 = 0.0460f; // 1.6000
-        k3 = 0.1100f; // 0.0010
-        k4 = 0.7500f; // 0.7500
+        _ctx.power_motor_data[i] =
+            power_controller_t::get_instance().register_motor(params);
     }
 
-    power_control_drv_t::get_instance(4).set_motor_coefficient(1, coef[0]);
-    power_control_drv_t::get_instance(4).set_motor_coefficient(2, coef[1]);
-    power_control_drv_t::get_instance(4).set_motor_coefficient(3, coef[2]);
-    power_control_drv_t::get_instance(4).set_motor_coefficient(4, coef[3]);
+    // 履带 （dm4310p）功控参数
+    // params.k1    = 0.10707706f; // 机械功率项系数
+    // params.k2    = 0.60690610f; // 铜损/热损耗系数
+    // params.k3    = 0.00001238f; // 高频摩擦系数
+    // params.k4    = 0.00000000f; // 库仑摩擦系数
+    // params.k5    = 0.85000000f; // 静态基础功耗 (强制固定)
+    // params.alpha = 0.00393f;    // 默认电阻温度系数
+
+    // 注册 2 个履带电机
+    // for (int i = 0; i < 2; i++)
+    // {
+    //     _ctx.power_motor_data[i + 4] =
+    //         power_controller_t::get_instance().register_motor(params);
+    // }
+
+    // 初始化缓冲能量 PID (安全缓冲参考值设为 60J,pid默认值)
+    power_controller_t::get_instance().config_buffer_loop(40.0f);
 }
 
 
@@ -69,50 +112,102 @@ void hybrid_chassis_t::_update_feedback()
         i->update_feedback();
     _ctx.motor.yaw->update_feedback();
 
-    // // 2. 读取 IMU 数据作为底盘姿态反馈
-    // ins_drv_t::get_instance()->get_rads_n(&_ctx.data.current_yaw_rad,
-    //                                       &_ctx.data.current_pitch_rad,
-    //                                       &_ctx.data.current_roll_rad);
-    // _ctx.data.current_pitch_rad -= PITCH_OFFSET_RAD;
-    // _ctx.data.current_roll_rad -= ROLL_OFFSET_RAD;
     // 2. 读取 IMU 数据作为底盘姿态反馈
     float raw_yaw, raw_pitch, raw_roll;
     ins_drv_t::get_instance()->get_rads_n(&raw_yaw, &raw_pitch, &raw_roll);
 
     // 减去机械安装零点偏移
     raw_pitch -= PITCH_OFFSET_RAD;
-    raw_roll  -= ROLL_OFFSET_RAD;
+    raw_roll -= ROLL_OFFSET_RAD;
 
-    // --- 一阶低通滤波 (LPF) ---
-    // 为了快速验证，这里使用 static 变量保存上一次的滤波状态
-    // 如果确认有效，建议将它们移到 _ctx.data 结构体中
+    // --- 一阶低通滤波 (IMU) ---
     static float filtered_pitch = 0.0f;
     static float filtered_roll  = 0.0f;
-    static bool  is_first_run   = true;
-
-    // 滤波系数 alpha：(0, 1]
-    // alpha = 1.0 表示完全不滤波；alpha 越小，抗噪声能力越强，但相位延迟越大。
-    // 对于 500Hz~1000Hz 的控制循环，0.1f ~ 0.3f 通常是一个比较理想的甜点值。
-    const float LPF_ALPHA = 0.15f;
+    static bool is_first_run    = true;
+    const float IMU_LPF_ALPHA   = 0.15f;
 
     if (is_first_run)
     {
-        // 第一次运行直接赋值，防止开机瞬间出现从 0 平滑过去的巨大阶跃
         filtered_pitch = raw_pitch;
         filtered_roll  = raw_roll;
         is_first_run   = false;
     }
     else
     {
-        // 迭代滤波公式
-        filtered_pitch = LPF_ALPHA * raw_pitch + (1.0f - LPF_ALPHA) * filtered_pitch;
-        filtered_roll  = LPF_ALPHA * raw_roll  + (1.0f - LPF_ALPHA) * filtered_roll;
+        filtered_pitch =
+            IMU_LPF_ALPHA * raw_pitch + (1.0f - IMU_LPF_ALPHA) * filtered_pitch;
+        filtered_roll =
+            IMU_LPF_ALPHA * raw_roll + (1.0f - IMU_LPF_ALPHA) * filtered_roll;
     }
 
-    // 将滤波后的平滑数据赋给上下文，供 VMC 和 PID 使用
-    _ctx.data.current_yaw_rad   = raw_yaw; // Yaw 通常不参与重力补偿，可暂不滤波
+    _ctx.data.current_yaw_rad   = raw_yaw;
     _ctx.data.current_pitch_rad = filtered_pitch;
     _ctx.data.current_roll_rad  = filtered_roll;
+
+    // =========================================================================
+    // --- 新增：测距模块 变化率限幅 + 二阶低通滤波 (2nd-Order LPF) ---
+    // =========================================================================
+    int32_t raw_front_dist_int32 =
+        static_cast<int32_t>(sr04_drv::get_instance().get_distance()) -
+        FRONT_DISTANCE_OFFSET;
+    int32_t raw_back_dist_int32 =
+        static_cast<int32_t>(sr05_drv::get_instance().get_distance()) -
+        BACK_DISTANCE_OFFSET;
+
+    auto raw_front_dist = static_cast<float>(raw_front_dist_int32);
+    auto raw_back_dist  = static_cast<float>(raw_back_dist_int32);
+
+    // if (!_ctx.data.distance_lpf_initialized)
+    // {
+    //     // 赋予初始值，防止开机瞬间缓慢从 0 爬升
+    //     for (int i = 0; i < 2; i++)
+    //     {
+    //         _ctx.data.front_lpf_state[i] = raw_front_dist;
+    //         _ctx.data.back_lpf_state[i]  = raw_back_dist;
+    //     }
+    //     _ctx.data.distance_lpf_initialized = true;
+    // }
+    // else
+    // {
+    // 1. 变化率限幅 (Slew Rate Limiting)
+    // 即使开机第一帧是毛刺导致初始化错误，后续也能以最大合法步长迅速回归真实值，避免死锁
+    float front_delta   = raw_front_dist - _ctx.data.front_lpf_state[1];
+    if (front_delta > CLIMB_DIST_MAX_JUMP)
+        raw_front_dist = _ctx.data.front_lpf_state[1] + CLIMB_DIST_MAX_JUMP;
+    else if (front_delta < -CLIMB_DIST_MAX_JUMP)
+        raw_front_dist = _ctx.data.front_lpf_state[1] - CLIMB_DIST_MAX_JUMP;
+
+    float back_delta = raw_back_dist - _ctx.data.back_lpf_state[1];
+    if (back_delta > CLIMB_DIST_MAX_JUMP)
+        raw_back_dist = _ctx.data.back_lpf_state[1] + CLIMB_DIST_MAX_JUMP;
+    else if (back_delta < -CLIMB_DIST_MAX_JUMP)
+        raw_back_dist = _ctx.data.back_lpf_state[1] - CLIMB_DIST_MAX_JUMP;
+
+    // 2. 前测距 二阶级联滤波 (平滑高频白噪声)
+    _ctx.data.front_lpf_state[0] =
+        CLIMB_DIST_LPF_ALPHA * raw_front_dist +
+        (1.0f - CLIMB_DIST_LPF_ALPHA) * _ctx.data.front_lpf_state[0];
+    _ctx.data.front_lpf_state[1] =
+        CLIMB_DIST_LPF_ALPHA * _ctx.data.front_lpf_state[0] +
+        (1.0f - CLIMB_DIST_LPF_ALPHA) * _ctx.data.front_lpf_state[1];
+
+    // 3. 后测距 二阶级联滤波
+    _ctx.data.back_lpf_state[0] =
+        CLIMB_DIST_LPF_ALPHA * raw_back_dist +
+        (1.0f - CLIMB_DIST_LPF_ALPHA) * _ctx.data.back_lpf_state[0];
+    _ctx.data.back_lpf_state[1] =
+        CLIMB_DIST_LPF_ALPHA * _ctx.data.back_lpf_state[0] +
+        (1.0f - CLIMB_DIST_LPF_ALPHA) * _ctx.data.back_lpf_state[1];
+    // }
+
+    _ctx.data.front_distance_mm       = static_cast<int32_t>(raw_front_dist);
+    _ctx.data.back_distance_mm        = static_cast<int32_t>(raw_back_dist);
+
+    // 取出第二阶的结果作为最终平滑值，供外部状态机判定使用
+    _ctx.data.filtered_front_distance = _ctx.data.front_lpf_state[1];
+    _ctx.data.filtered_back_distance  = _ctx.data.back_lpf_state[1];
+    // =========================================================================
+
 
     // 3. 转换并记录电机转速与位置
     float current_angle =
@@ -126,26 +221,69 @@ void hybrid_chassis_t::_update_feedback()
         _ctx.data.current_wheel_rpm[i] =
             radps_to_rpm(_ctx.motor.mecanum[i]->get_current_rotate() *
                          dji_m3508_motor_drv_t::reciprocal_reduction_ratio);
+        _ctx.data.current_mecanum_torque[i] =
+            _ctx.motor.mecanum[i]->get_current_torque();
+        _ctx.data.current_mecanum_temp[i] =
+            _ctx.motor.mecanum[i]->get_temperature();
         _ctx.data.wheel_online[i] = _ctx.motor.mecanum[i]->is_online();
     }
 
+    auto real_vel = _kinematics->forward_solve(
+        rpm_to_mps(_ctx.data.current_wheel_rpm[0], WHEEL_RADIUS),
+        rpm_to_mps(-_ctx.data.current_wheel_rpm[1], WHEEL_RADIUS),
+        rpm_to_mps(_ctx.data.current_wheel_rpm[2], WHEEL_RADIUS),
+        rpm_to_mps(-_ctx.data.current_wheel_rpm[3], WHEEL_RADIUS));
+
+    _ctx.data.real_vx = real_vel.vx;
+    _ctx.data.real_vy = real_vel.vy;
+    _ctx.data.real_wz = real_vel.wz;
+
     for (int i = 0; i < 2; i++)
+    {
         _ctx.data.current_track_rpm[i] =
             radps_to_rpm(_ctx.motor.track[i]->get_current_rotate());
+        _ctx.data.current_track_torque[i] =
+            _ctx.motor.track[i]->get_current_torque();
+        _ctx.data.current_track_temp[i] =
+            _ctx.motor.track[i]->get_temperature();
+    }
 
     // 左右腿对称性修正：对右腿(leg[1])的读取数据取反，抹平机械差异
-    // 左右腿对称性修正与机械零点 Offset 处理
-    // 【左腿】：原本是 (pos - offset)，现在电机反转，所以整体取反变成 -(pos - offset)
     float left_leg_raw =
         -(_ctx.motor.leg[0]->get_current_position() - LEFT_LEG_OFFSET_RAD);
     _ctx.data.current_leg_rad[0]   = loop_fp32_constrain(left_leg_raw, -PI, PI);
     _ctx.data.current_leg_radps[0] = -_ctx.motor.leg[0]->get_current_rotate();
 
-    // 【右腿】：原本就是 -(pos - offset)，现在电机也反了，负负得正变成 (pos - offset)
     float right_leg_raw =
         _ctx.motor.leg[1]->get_current_position() - RIGHT_LEG_OFFSET_RAD;
     _ctx.data.current_leg_rad[1] = loop_fp32_constrain(right_leg_raw, -PI, PI);
     _ctx.data.current_leg_radps[1] = _ctx.motor.leg[1]->get_current_rotate();
+
+
+    _ctx.powermeter->get_data(_ctx.powermeter_feedback);
+
+    _ctx.data.total_predicted_power =
+        power_controller_t::get_instance().get_total_predicted_power();
+
+    _ctx.data.buf_energy =
+        referee_drv_t::get_instance()->get_data().power_heat.buffer_energy;
+
+    // 4. 更新 cap_tx 数据
+    _ctx.supercap_cmd.power_referee = 0;
+    _ctx.supercap_cmd.power_limit_referee =
+        referee_drv_t::get_instance()
+            ->get_data()
+            .robot_status.chassis_power_limit;
+    _ctx.supercap_cmd.power_buffer_limit_referee = 60.0f;
+    _ctx.supercap_cmd.power_buffer_referee =
+        referee_drv_t::get_instance()->get_data().power_heat.buffer_energy;
+    _ctx.supercap_cmd.kill_chassis_user = 0;
+    _ctx.supercap_cmd.speed_up_user_now = 0;
+
+    // 5. 更新 cap_rx 数据
+    _ctx.cap_feedback = supercap_drv_t::get_instance()->get_feedback();
+
+    _ctx.powermeter->get_data(_ctx.powermeter_feedback);
 }
 
 // =========================================================
@@ -159,20 +297,57 @@ void hybrid_chassis_t::_kinematics_solve()
     // -------------------------------------------------------------
     // Calculate(measurement, target) 或 (error, 0)
     // 假设 pid_t::calculate(target, current)，我们将 error 作为 P项输入
-    float yaw_err = _ctx.data.target_yaw_rad - _ctx.data.current_yaw_rad;
-    if (yaw_err < -PI)
-    {
-        _ctx.data.target_yaw_rad += 2 * PI;
-    }
-    else if (yaw_err > PI)
-    {
-        _ctx.data.target_yaw_rad -= 2 * PI;
-    }
-    // const float follow_wz = _ctx.pid.follow_yaw_pid->calculate(
-    //     _ctx.data.target_yaw_rad, _ctx.data.current_yaw_rad);
+    float target_relative_yaw_rad = 0.0f;
+    const auto now_tick = static_cast<uint32_t>(xTaskGetTickCount());
 
+    if (_ctx.cmd->pseudo_gyro_en)
+    {
+        if (!_ctx.data.pseudo_gyro_active)
+        {
+            _ctx.data.pseudo_gyro_active    = true;
+            _ctx.data.pseudo_gyro_phase_rad = 0.0f;
+            _ctx.data.pseudo_gyro_last_tick = now_tick;
+            if (_ctx.pid.follow_yaw_pid != nullptr)
+            {
+                _ctx.pid.follow_yaw_pid->clear();
+            }
+        }
+        else
+        {
+            const uint32_t elapsed_tick =
+                now_tick - _ctx.data.pseudo_gyro_last_tick;
+            const float elapsed_s =
+                static_cast<float>(elapsed_tick * portTICK_PERIOD_MS) *
+                0.001f;
+
+            _ctx.data.pseudo_gyro_phase_rad =
+                loop_fp32_constrain(_ctx.data.pseudo_gyro_phase_rad +
+                                        PSEUDO_GYRO_PHASE_RADPS * elapsed_s,
+                                    -PI, PI);
+            _ctx.data.pseudo_gyro_last_tick = now_tick;
+        }
+
+        target_relative_yaw_rad =
+            PSEUDO_GYRO_YAW_AMPLITUDE_RAD *
+            arm_sin_f32(_ctx.data.pseudo_gyro_phase_rad);
+    }
+    else
+    {
+        if (_ctx.data.pseudo_gyro_active && _ctx.pid.follow_yaw_pid != nullptr)
+        {
+            _ctx.pid.follow_yaw_pid->clear();
+        }
+        _ctx.data.pseudo_gyro_active         = false;
+        _ctx.data.pseudo_gyro_phase_rad      = 0.0f;
+        _ctx.data.pseudo_gyro_target_yaw_rad = 0.0f;
+        _ctx.data.pseudo_gyro_last_tick      = now_tick;
+    }
+
+    _ctx.data.pseudo_gyro_target_yaw_rad = target_relative_yaw_rad;
+    const float yaw_pid_measure =
+        _ctx.data.current_yaw_error + target_relative_yaw_rad;
     const float follow_wz =
-        _ctx.pid.follow_yaw_pid->calculate(0.0f, _ctx.data.current_yaw_error);
+        _ctx.pid.follow_yaw_pid->calculate(0.0f, yaw_pid_measure);
 
     // 最终角速度 = 跟随产生的角速度 + 选手手动输入的角速度(小陀螺/微调)
     float final_wz      = follow_wz;
@@ -204,46 +379,59 @@ void hybrid_chassis_t::_kinematics_solve()
     float vy_chassis    = -_ctx.cmd->vx * s_theta + _ctx.cmd->vy * c_theta;
 
 
+    if (abs(final_wz) > 2.5f)
+    {
+        vx_chassis *= 0.15f;
+        vy_chassis *= 0.15f;
+    }
 
-    int offline_count   = 0;
-    auto missing_wheel  = hybrid_kin_t::missing_mec_e::NONE;
 
-    // // 根据数组索引对应找出具体离线的轮子 (0:FL, 1:FR, 2:BL, 3:BR)
-    // if (!_ctx.data.wheel_online[0])
-    // {
-    //     offline_count++;
-    //     missing_wheel = hybrid_kin_t::missing_mec_e::FL;
-    // }
-    // if (!_ctx.data.wheel_online[1])
-    // {
-    //     offline_count++;
-    //     missing_wheel = hybrid_kin_t::missing_mec_e::FR;
-    // }
-    // if (!_ctx.data.wheel_online[2])
-    // {
-    //     offline_count++;
-    //     missing_wheel = hybrid_kin_t::missing_mec_e::BL;
-    // }
-    // if (!_ctx.data.wheel_online[3])
-    // {
-    //     offline_count++;
-    //     missing_wheel = hybrid_kin_t::missing_mec_e::BR;
-    // }
-    //
-    // // 如果有两个或以上的轮子离线，失去冗余控制能力，强制速度全为 0
-    // if (offline_count >= 2)
-    // {
-    //     vx_chassis    = 0.0f;
-    //     vy_chassis    = 0.0f;
-    //     final_wz      = 0.0f;
-    //     missing_wheel = hybrid_kin_t::missing_mec_e::NONE; // 速度全为0
-    // }
+    if (_ctx.cmd->crossing_en)
+    {
+        vx_chassis = std::clamp(vx_chassis, -0.7f, 0.7f);
+    }
+
+
+
+    int offline_count  = 0;
+    auto missing_wheel = hybrid_kin_t::missing_mec_e::NONE;
+
+    // 根据数组索引对应找出具体离线的轮子 (0:FL, 1:FR, 2:BL, 3:BR)
+    if (!_ctx.data.wheel_online[0])
+    {
+        offline_count++;
+        missing_wheel = hybrid_kin_t::missing_mec_e::FL;
+    }
+    if (!_ctx.data.wheel_online[1])
+    {
+        offline_count++;
+        missing_wheel = hybrid_kin_t::missing_mec_e::FR;
+    }
+    if (!_ctx.data.wheel_online[2])
+    {
+        offline_count++;
+        missing_wheel = hybrid_kin_t::missing_mec_e::BL;
+    }
+    if (!_ctx.data.wheel_online[3])
+    {
+        offline_count++;
+        missing_wheel = hybrid_kin_t::missing_mec_e::BR;
+    }
+
+    // 如果有两个或以上的轮子离线，失去冗余控制能力，强制速度全为 0
+    if (offline_count >= 2)
+    {
+        vx_chassis    = 0.0f;
+        vy_chassis    = 0.0f;
+        final_wz      = 0.0f;
+        missing_wheel = hybrid_kin_t::missing_mec_e::NONE; // 速度全为0
+    }
 
     // -------------------------------------------------------------
     // 4. 运动学解算 (带入缺失轮枚举)
     // -------------------------------------------------------------
     const auto wheel_speeds = _kinematics->solve(
-        vx_chassis, vy_chassis, final_wz, _ctx.cmd->track_en, missing_wheel);
+        vx_chassis, vy_chassis, final_wz, _ctx.cmd->crossing_en, missing_wheel);
 
     // 麦轮转速分配 (右侧反转视底层驱动而定，此处按常规处理)
     _ctx.data.target_wheel_rpm[0] =
@@ -256,7 +444,7 @@ void hybrid_chassis_t::_kinematics_solve()
         -mps_to_rpm(wheel_speeds.mec_br, WHEEL_RADIUS);
 
     // 履带分配 (差速模型)
-    if (_ctx.cmd->track_en)
+    if (_ctx.cmd->crossing_en)
     {
         _ctx.data.target_track_rpm[0] =
             mps_to_rpm(wheel_speeds.track_l, TRACK_RADIUS);
@@ -272,34 +460,135 @@ void hybrid_chassis_t::_kinematics_solve()
     _ctx.data.target_pitch_rad = NORMAL_PITCH;
 }
 
+void hybrid_chassis_t::_supercap_control()
+{
+    // NOLINTBEGIN
+    static bool cap_enabled = false;
+    static uint32_t enable_timer = 0;
+    static uint32_t refresh_timer = 0;
+    static uint32_t disable_timer = 0;
+
+    bool current_status      = referee_drv_t::get_instance()
+                              ->get_data()
+                              .robot_status.power_management_chassis_output;
+
+    if (current_status)
+    {
+        disable_timer = 0;
+
+        if (!cap_enabled)
+        {
+            refresh_timer = 0;
+            if (++enable_timer >= SUPERCAP_ENABLE_DELAY_TICKS)
+            {
+                enable_timer             = 0;
+                cap_enabled              = true;
+                _ctx.supercap_cmd.use_cap = 1;
+                supercap_drv_t::get_instance()->send_cmd(_ctx.supercap_cmd);
+            }
+        }
+        else if (++refresh_timer >= SUPERCAP_REFRESH_TICKS)
+        {
+            refresh_timer           = 0;
+            _ctx.supercap_cmd.use_cap = 1;
+            _ctx.supercap_cmd.power_buffer_referee =
+                referee_drv_t::get_instance()
+                    ->get_data()
+                    .power_heat.buffer_energy;
+            supercap_drv_t::get_instance()->send_cmd(
+                _ctx.supercap_cmd); // NOLINT
+        }
+    }
+    else
+    {
+        enable_timer  = 0;
+        refresh_timer = 0;
+
+        if (cap_enabled &&
+            ++disable_timer >= SUPERCAP_DISABLE_DEBOUNCE_TICKS)
+        {
+            disable_timer            = 0;
+            cap_enabled              = false;
+            _ctx.supercap_cmd.use_cap = 0;
+            supercap_drv_t::get_instance()->send_cmd(
+                _ctx.supercap_cmd); // NOLINT
+        }
+        else if (!cap_enabled)
+        {
+            disable_timer = 0;
+        }
+    }
+    // NOLINTEND
+}
+
+
 void hybrid_chassis_t::_power_control()
 {
+    // 1. 将底层反馈与 PID 输出的期望扭矩传入功率控制节点
     for (int i = 0; i < 4; i++)
     {
-        _ctx.power_motor_data[i].gyro       = _ctx.data.current_wheel_rpm[i];
-        _ctx.power_motor_data[i].torque_cmd = _ctx.data.out_mecanum_torque[i];
-        _ctx.power_motor_data[i].power_predict =
-            power_control_drv_t::get_instance().motor_power_predict(
-                i, _ctx.power_motor_data[i].torque_cmd,
-                _ctx.power_motor_data[i].gyro);
+        if (_ctx.power_motor_data[i] != nullptr)
+        {
+            _ctx.power_motor_data[i]->target_cmd =
+                _ctx.data.out_mecanum_torque[i];
+            _ctx.power_motor_data[i]->rpm  = _ctx.data.current_wheel_rpm[i];
+            _ctx.power_motor_data[i]->temp = _ctx.data.current_mecanum_temp[i];
+        }
     }
-    // if (_ctx.cap_feedback.vot_cap >= 1800)
+
+    // for (int i = 0; i < 2; i++)
     // {
-    //     power_control_drv_t::get_instance().calculate_restricted_torques(
-    //         _ctx.power_motor_data, 4,
-    //         static_cast<float>(referee_drv_t::get_instance()
-    //                                ->get_data()
-    //                                .robot_status.chassis_power_limit) +
-    //             100.0f);
+    //     if (_ctx.power_motor_data[i + 4] != nullptr)
+    //     {
+    //         _ctx.power_motor_data[i + 4]->target_cmd =
+    //             _ctx.data.out_track_torque[i];
+    //         _ctx.power_motor_data[i + 4]->rpm =
+    //         _ctx.data.current_track_rpm[i]; _ctx.power_motor_data[i +
+    //         4]->temp =
+    //             _ctx.data.current_track_temp[i];
+    //     }
     // }
-    // else
-    // {
-    power_control_drv_t::get_instance().calculate_restricted_torques(
-        _ctx.power_motor_data, 4, 240,60);
-    // }
+
+    // 2. 调用核心求解器进行动态功率限制
+
+    static bool cap_extra_power_enabled = false;
+    if (_ctx.cap_feedback.vot_cap >= CAP_EXTRA_POWER_ENABLE_CV)
+    {
+        cap_extra_power_enabled = true;
+    }
+    else if (_ctx.cap_feedback.vot_cap <= CAP_EXTRA_POWER_DISABLE_CV)
+    {
+        cap_extra_power_enabled = false;
+    }
+
+    const float cap_extra_power =
+        cap_extra_power_enabled ? CAP_EXTRA_POWER_W : 0.0f;
+
+    power_controller_t::get_instance().solve(
+        referee_drv_t::get_instance()
+            ->get_data()
+            .robot_status.chassis_power_limit,
+        referee_drv_t::get_instance()->get_data().power_heat.buffer_energy,
+        cap_extra_power);
+
+    // 3. 将解算后的安全指令写回到底盘数据上下文中，等待发送
     for (int i = 0; i < 4; i++)
-        _ctx.data.out_mecanum_torque[i] =
-            _ctx.power_motor_data[i].restricted_torque;
+    {
+        if (_ctx.power_motor_data[i] != nullptr)
+        {
+            _ctx.data.out_mecanum_torque[i] =
+                _ctx.power_motor_data[i]->safe_cmd;
+        }
+    }
+
+    // for (int i = 0; i < 2; i++)
+    // {
+    //     if (_ctx.power_motor_data[i + 4] != nullptr)
+    //     {
+    //         _ctx.data.out_track_torque[i] = _ctx.power_motor_data[i +
+    //         4]->safe_cmd;
+    //     }
+    // }
 }
 
 
@@ -417,6 +706,7 @@ void hybrid_chassis_t::_leg_length_control()
     // 使用专为长度控制放宽的限幅 LEG_LENGTH_MIN_POS (0.0f) 加上缓冲，
     // 确保收腿指令能引导机构钻入最深处的物理限位
     const float target_theta = LEG_LENGTH_MIN_POS + LEG_LENGTH_POS_BUFFER_RAD;
+    // const float target_theta = 1.4f;
     const float target_y =
         evaluate_polynomial(target_theta, YB_POLY_COEF, YB_POLY_DEGREE);
 
@@ -492,24 +782,15 @@ void hybrid_chassis_t::_leg_length_control()
         }
 
         // 7. 物理限幅与最终输出
-        float tau_total = tau_pid + tau_wall + tau_gravity_ff;
+        float tau_total             = tau_pid + tau_wall + tau_gravity_ff;
         // float tau_total = tau_gravity_ff;
-        tau_total = fminf(fmaxf(tau_total, -LEG_MAX_TORQUE), LEG_MAX_TORQUE);
+        tau_total                   = fminf(fmaxf(tau_total, -18.0f), 18.0f);
 
         // 针对右腿作符号反转映射
         // _ctx.data.out_leg_torque[i] = (i == 0 ? 1.0f : -1.0f) * tau_total;
         _ctx.data.out_leg_torque[i] = (i == 0 ? -1.0f : 1.0f) * tau_total;
     }
 }
-
-void hybrid_chassis_t::_communicate_gimbal() const
-{
-    pyro::can_tx_drv_t::clear(0x102);
-    pyro::can_tx_drv_t::add_data(0x102, 32, _ctx.data.current_pitch_rad);
-    pyro::can_tx_drv_t::send(
-        0x102, can_hub_t::get_instance()->hub_get_can_obj(can_hub_t::can1));
-}
-
 
 
 void hybrid_chassis_t::_mecanum_control()
@@ -562,17 +843,38 @@ void hybrid_chassis_t::_send_motor_command() const
     }
     // 腿部电机：保持原频率控制 (VMC 和腿长控制通常需要高频以维持稳定性)
     for (int i = 0; i < 2; i++)
-        _ctx.motor.leg[i]->send_torque(0);
-
-
+        _ctx.motor.leg[i]->send_torque(_ctx.data.out_leg_torque[i]);
 }
 // =========================================================
 // 核心运行时与状态机
 // =========================================================
 
+void hybrid_chassis_t::_calibrate_leg_offsets()
+{
+    if (!_ctx.motor.leg[0] || !_ctx.motor.leg[1])
+    {
+        return;
+    }
+
+    LEFT_LEG_OFFSET_RAD  = _ctx.motor.leg[0]->get_current_position();
+    RIGHT_LEG_OFFSET_RAD = _ctx.motor.leg[1]->get_current_position();
+    _ctx.data.current_leg_rad[0] = 0.0f;
+    _ctx.data.current_leg_rad[1] = 0.0f;
+    _ctx.data.target_leg_rad[0]  = 0.0f;
+    _ctx.data.target_leg_rad[1]  = 0.0f;
+}
+
 void hybrid_chassis_t::_fsm_execute()
 {
     _ctx.cmd = &_current_cmd;
+
+    if (_ctx.cmd->leg_calibration != _last_leg_calibration_flag)
+    {
+        _last_leg_calibration_flag = _ctx.cmd->leg_calibration;
+        _calibrate_leg_offsets();
+    }
+
+    _supercap_control();
 
     if (cmd_base_t::mode_t::ACTIVE == _ctx.cmd->mode)
         _main_fsm.change_state(&_state_active);

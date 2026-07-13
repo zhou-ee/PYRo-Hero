@@ -1,5 +1,6 @@
 #include "pyro_dwt_drv.h"
 #include "pyro_quad_booster.h"
+#include "quad_config.h"
 
 
 namespace pyro
@@ -18,7 +19,7 @@ void quad_booster_t::fsm_active_t::state_homing_t::execute(owner *owner)
         request_switch(&owner->_state_active._interim_state);
         return;
     }
-    owner->_ctx.data.target_trig_radps = 8.0f; // 3 rad/s
+    owner->_ctx.data.target_trig_radps = -TRIGGER_FEED_DIR * 6.0f;
     owner->_trigger_speed_control();
     owner->_send_trigger_command();
 }

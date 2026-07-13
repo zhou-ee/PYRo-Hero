@@ -4,6 +4,7 @@
 set(BOARD "GIMBAL_BOARD")
 #set(BOARD "CHASSIS_BOARD")
 
+
 # =========================================================================
 # 2. 声明Hero目标文件库（OBJECT库，仅编译目标文件不链接，保留原工程逻辑）
 # =========================================================================
@@ -37,6 +38,7 @@ if (BOARD STREQUAL "GIMBAL_BOARD")
             # === Booster 模块 ===
             Booster/pyro_quad_booster.cpp
             Booster/fsm/pyro_quad_active_state.cpp
+            Booster/fsm/pyro_quad_anti_jam_state.cpp
             Booster/fsm/pyro_quad_busy_state.cpp
             Booster/fsm/pyro_quad_homing_state.cpp
             Booster/fsm/pyro_quad_interim_state.cpp
@@ -48,6 +50,11 @@ if (BOARD STREQUAL "GIMBAL_BOARD")
             # === Communication ===
             Communication/Gimbal_board/pyro_autoaim_drv.cpp
             Communication/Gimbal_board/pyro_autoaim_com.cpp
+#            Communication/Gimbal_board/pyro_custom_drv.cpp
+#            Communication/Gimbal_board/pyro_custom_com.cpp
+            Communication/Gimbal_board/pyro_board_com.cpp
+            Communication/general/pyro_board_drv.cpp
+
 
             pyro_mission_planer.cpp
             pyro_init_thread.cpp
@@ -59,6 +66,7 @@ if (BOARD STREQUAL "GIMBAL_BOARD")
             ${CMAKE_CURRENT_SOURCE_DIR}/Booster
             ${CMAKE_CURRENT_SOURCE_DIR}/Gimbal
             ${CMAKE_CURRENT_SOURCE_DIR}/Communication/Gimbal_board
+            ${CMAKE_CURRENT_SOURCE_DIR}/Communication/General
             ${CMAKE_CURRENT_SOURCE_DIR}
     )
     target_compile_definitions(PYRo PUBLIC
@@ -82,6 +90,13 @@ elseif (BOARD STREQUAL "CHASSIS_BOARD")
             Chassis/fsm/pyro_hybrid_passive_state.cpp
             Chassis/fsm/pyro_hybrid_track_climbing_state.cpp
 
+            # === Communication ===
+            Communication/Chassis_board/pyro_board_com.cpp
+            Communication/General/pyro_board_drv.cpp
+            Communication/Chassis_board/pyro_ui_com.cpp
+            Communication/Chassis_board/pyro_board_com.cpp
+
+
             pyro_mission_planer.cpp
             pyro_init_thread.cpp
     )
@@ -90,11 +105,15 @@ elseif (BOARD STREQUAL "CHASSIS_BOARD")
     target_include_directories(Hero
             PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/Chassis
+            ${CMAKE_CURRENT_SOURCE_DIR}/Communication/Chassis_board
+            ${CMAKE_CURRENT_SOURCE_DIR}/Communication/General
             ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
     target_compile_definitions(PYRo PUBLIC
             REFEREE_UART=PYRO_UART1
+            SR05_UART=PYRO_UART5
+            SR04_UART=PYRO_UART10
             SUPERCAP_UART=PYRO_UART7
     )
 endif ()
@@ -115,4 +134,3 @@ target_link_libraries(Hero
         dsppp_lib
         PYRo
 )
-

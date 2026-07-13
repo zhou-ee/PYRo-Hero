@@ -7,7 +7,9 @@
 #include "pyro_motor_base.h"
 #include "pyro_ins.h" // 新增 IMU 依赖
 #include "hybrid_config.h"
-#include "pyro_power_control_drv.h"
+#include "pyro_power_control.h"
+#include "pyro_powermeter.h"
+#include "pyro_supercap_drv.h"
 
 namespace pyro
 {
@@ -22,11 +24,14 @@ struct hybrid_cmd_t : cmd_base_t
     float wz;          // z轴角速度 rad/s (通常跟随模式下该值为0，除非做小陀螺)
     float delta_pitch; // 腿部目标位置相对于当前的增量 rad
     float delta_yaw;
-    bool track_en;    // 是否启用履带 (true: 履带 + 麦轮混合驱动, false: 仅麦轮)
-    bool leg_retract; // 是否进入腿部收回状态 (仅在 track_en=true 时有效)
+    bool leg_calibration;
+    bool pseudo_gyro_en;
+    bool crossing_en; // 是否启用履带 (true: 履带 + 麦轮混合驱动, false: 仅麦轮)
+    bool leg_retract; // 是否进入腿部收回状态 (仅在 crossing_en=true 时有效)
 
     hybrid_cmd_t()
-        : vx(0), vy(0), wz(0), delta_pitch(0), delta_yaw(0), track_en(false),
+        : vx(0), vy(0), wz(0), delta_pitch(0), delta_yaw(0),
+          leg_calibration(false), pseudo_gyro_en(false), crossing_en(false),
           leg_retract(false)
     {
     }
@@ -68,6 +73,8 @@ class hybrid_chassis_t final
 {
     friend class module_base_t<hybrid_chassis_t, hybrid_cmd_t, hybrid_deps_t>;
 
+    friend class jcom_drv_t;
+
     struct motor_deps_t;
     struct pid_deps_t;
     struct data_ctx_t;
@@ -76,6 +83,8 @@ class hybrid_chassis_t final
   public:
     hybrid_chassis_t(const hybrid_chassis_t &)            = delete;
     hybrid_chassis_t &operator=(const hybrid_chassis_t &) = delete;
+
+    hybrid_context_t& get_ctx();
 
   private:
     hybrid_chassis_t();
@@ -87,15 +96,16 @@ class hybrid_chassis_t final
     void _fsm_execute() override;
 
     // --- 派生方法 ---
-    static void _power_control_init();
+    void _power_control_init();
     void _kinematics_solve();
+    void _supercap_control();
     void _power_control();
     void _mecanum_control();
     void _track_control();
     void _leg_vmc();
     void _leg_length_control();
+    void _calibrate_leg_offsets();
     void _send_motor_command() const;
-    void _communicate_gimbal() const;
     hybrid_kin_t *_kinematics{nullptr};
 
     // 运行时数据
@@ -114,11 +124,28 @@ class hybrid_chassis_t final
         float target_pitch_rad{0};
         float target_yaw_rad{0};
 
-        // 测距模块反馈
-        uint16_t distance_mm{0};
+        // 逆解算速度
+        float real_vx{0};
+        float real_vy{0};
+        float real_wz{0};
+
+        // 测距模块原始反馈
+        int32_t front_distance_mm{0};
+        int32_t back_distance_mm{0};
+
+        // --- 新增：测距 2阶 LPF 状态变量 ---
+        float filtered_front_distance{0.0f};
+        float filtered_back_distance{0.0f};
+        float front_lpf_state[2]{0.0f, 0.0f}; // 数组大小改为 2
+        float back_lpf_state[2]{0.0f, 0.0f};
+        bool  distance_lpf_initialized{false};
 
         // YAW 电机差值反馈（用于底盘跟随云台）
         float current_yaw_error{0};
+        float pseudo_gyro_phase_rad{0};
+        float pseudo_gyro_target_yaw_rad{0};
+        uint32_t pseudo_gyro_last_tick{0};
+        bool pseudo_gyro_active{false};
         float target_wheel_rpm[4]{};
         float target_track_rpm[2]{};
         float target_leg_rad[2]{};
@@ -128,6 +155,14 @@ class hybrid_chassis_t final
         float out_mecanum_torque[4]{};
         float out_track_torque[2]{};
         float out_leg_torque[2]{};
+
+        // 电机功率相关反馈
+        float current_mecanum_torque[4]{};
+        float current_mecanum_temp[4]{};
+        float current_track_torque[2]{};
+        float current_track_temp[2]{};
+        float total_predicted_power{};
+        float buf_energy{};
     };
 
     struct hybrid_context_t
@@ -135,12 +170,17 @@ class hybrid_chassis_t final
         hybrid_deps_t::motor_deps_t motor;
         hybrid_deps_t::pid_deps_t pid;
         data_ctx_t data;
-        power_control_drv_t::motor_data_t power_motor_data[4]{};
+        powermeter_drv_t *powermeter{nullptr};
+        powermeter_data powermeter_feedback{};
+        supercap_drv_t::chassis_cmd_t supercap_cmd{};
+        supercap_drv_t::cap_feedback_t cap_feedback{};
+        power_node_t *power_motor_data[6]{};
         hybrid_cmd_t *cmd{};
     };
 
     // 总 Context
     hybrid_context_t _ctx;
+    bool _last_leg_calibration_flag{false};
 
     // =====================================================
     // 状态定义 (HFSM)
@@ -185,6 +225,10 @@ class hybrid_chassis_t final
           private:
             track_climbing_state_t track_climbing_state;
             leg_retraction_state_t leg_retraction_state;
+
+            // 自动收腿控制标志位
+            bool _auto_retract_flag{false};
+            uint32_t _retract_hold_tick{0};
         };
 
         // FSM Hooks

@@ -30,6 +30,8 @@ void hybrid_chassis_t::fsm_active_t::cruising_state_t::execute(owner *owner)
     // 2. 麦轮速度环控制 (提供平面移动的主动力)
     owner->_mecanum_control();
 
+    owner->_power_control();
+
     // 3. 巡航模式：强制关闭履带输出，省电并防止干扰
     owner->_ctx.data.out_track_torque[0] = 0.0f;
     owner->_ctx.data.out_track_torque[1] = 0.0f;

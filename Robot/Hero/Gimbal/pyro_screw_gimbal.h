@@ -2,6 +2,7 @@
 #define __PYRO_SCREW_GIMBAL_H__
 
 #include "pyro_algo_pid.h"
+#include "pyro_algo_leso.h" // 【新增】引入 LESO 观测器
 #include "pyro_dji_motor_drv.h"
 #include "pyro_dm_motor_drv.h"
 #include "pyro_module_base.h"
@@ -15,49 +16,65 @@ namespace pyro
 // =========================================================
 struct screw_gimbal_cmd_t final : public cmd_base_t
 {
-    float pitch_delta_angle; // 目标 Pitch 角度增量 (rad)
-    float yaw_delta_angle;   // 目标 Yaw 角度增量 (rad)
+    enum class sling_preaim_source_t : uint8_t
+    {
+        NONE = 0,
+        FIXED_DELTA,
+        CHASSIS_COORD
+    };
 
-    // 校准触发标志位 (外部传入，0->1 触发校准)
+    float pitch_delta_angle;
+    float yaw_delta_angle;
+
     bool trigger_calibration;
-
-    bool sling_mode; // 吊射模式标志位 (App层下发)
-
-    // 自瞄数据
-    bool autoaim_mode; // 自瞄模式标志位 (App层下发)
+    bool sling_mode;
+    bool sling_pitch_flag;
+    uint32_t sling_preaim_seq;
+    sling_preaim_source_t sling_preaim_source;
+    bool autoaim_mode;
+    bool track_en;
     float target_pitch;
     float target_yaw;
 
     screw_gimbal_cmd_t()
         : pitch_delta_angle(0.0f), yaw_delta_angle(0.0f),
-          trigger_calibration(false), sling_mode(false), autoaim_mode(false),
-          target_pitch(0.0f), target_yaw(0.0f)
+          trigger_calibration(false), sling_mode(false),
+          sling_pitch_flag(false), sling_preaim_seq(0),
+          sling_preaim_source(sling_preaim_source_t::NONE),
+          autoaim_mode(false), track_en(false), target_pitch(0.0f),
+          target_yaw(0.0f)
     {
     }
 };
 
 struct screw_gimbal_deps_t
 {
-    // 电机句柄
     struct motor_deps_t
     {
         motor_base_t *pitch{nullptr};
         motor_base_t *yaw{nullptr};
     };
 
-    // 算法对象 (串级 PID)
     struct pid_deps_t
     {
         pid_t *pitch_pos{nullptr};
         pid_t *pitch_spd{nullptr};
+
+        // 自瞄专用 PID 参数
+        pid_t *pitch_auto_pos{nullptr};
+        pid_t *pitch_auto_spd{nullptr};
+
         pid_t *yaw_pos{nullptr};
         pid_t *yaw_spd{nullptr};
-        pid_t *yaw_relative_pos{nullptr}; // 吊射模式专用的相对位置 PID
-        pid_t *yaw_relative_spd{nullptr}; // 吊射模式专用的相对速度 PID
+        pid_t *yaw_relative_pos{nullptr};
+        pid_t *yaw_relative_spd{nullptr};
 
-        // --- 新增：自瞄专用的全 IMU 串级 PID ---
-        pid_t *pitch_autoaim_pos{nullptr};
-        pid_t *pitch_autoaim_spd{nullptr};
+        // 【新增】吊射模式下用于 Yaw 轴机械角前馈补偿的 LESO
+        leso_t<3> *yaw_pos_leso{nullptr};
+        leso_t<2> *yaw_spd_leso{nullptr};
+
+        leso_t<3> *yaw_pos_imu_leso{nullptr};
+        leso_t<2> *yaw_spd_imu_leso{nullptr};
     };
 
     motor_deps_t motor_deps{};
@@ -79,7 +96,7 @@ class screw_gimbal_t final
     struct gimbal_context_t;
 
   public:
-    [[nodiscard]] gimbal_context_t get_ctx() const;
+    [[nodiscard]] gimbal_context_t& get_ctx();
 
   private:
     screw_gimbal_t();
@@ -92,36 +109,38 @@ class screw_gimbal_t final
 
     // --- 私有辅助方法 ---
     void _gimbal_control();
-    void _gimbal_sling_control();
     void _gimbal_autoaim_control();
+    void _gimbal_sling_control();
     static void _send_motor_command(gimbal_context_t *ctx);
     void _communicate_chassis();
     void _calculate_relative_angles();
+    void _handle_dynamic_calibration();
+    void _apply_yaw_relative_limit();
 
-    // --- 新增：核心运动学与校准方法 ---
+    // --- 核心运动学 (纯数学模型，需外部传入任意角度解算) ---
     bool _calibrate_pitch_offset();
     float _pitch_rad_to_motor_rad(float pitch_rad) const;
     float _motor_rad_to_pitch_rad(float motor_rad) const;
-    float _pitch_radps_to_motor_radps(float pitch_radps,
-                                      float current_pitch_rad) const;
-    float _motor_radps_to_pitch_radps(float motor_radps,
-                                      float current_motor_rad) const;
+    float _get_motor_to_pitch_jacobian(float pitch_rad) const;
 
-    // --- 新增：摩擦与重力矩前馈补偿 ---
-    float _calculate_pitch_compensation(float current_pitch_rad,
-                                        float target_pitch_radps) const;
+    // --- 业务控制逻辑 (无参化，完全依赖 _ctx.data 内部状态) ---
+    float _calculate_pitch_compensation(bool is_autoaim) const;
 
     // --- 成员变量 ---
 
-    // 上电校准逻辑暂存
     uint32_t _calib_tick{0};
     float _calib_pitch_sum{0.0f};
+
+    // 动态校准计时与均值缓存
+    uint32_t _dynamic_calib_timer{0};
+    float _dynamic_calib_sum{0.0f};
 
     // 运行时数据
     struct data_ctx_t
     {
         bool is_calibrating{false};
         bool has_initial_calibrated{false};
+        bool allow_dynamic_calib{true}; // 是否允许动态校准
 
         float pitch_motor_upper_limit{0};
         float pitch_motor_lower_limit{0};
@@ -133,6 +152,10 @@ class screw_gimbal_t final
         // --- 反馈 (含 Offset) ---
         float current_pitch_motor_rad{0};
         float current_pitch_motor_radps{0};
+        float current_pitch_motor_world{0};
+
+        // 当前姿态下的传动比缓存 (dMotor / dPitch)
+        float current_jacobian{0};
 
         // 姿态反馈 (基于 IMU)
         float pitch_imu_rad{0};
@@ -149,28 +172,37 @@ class screw_gimbal_t final
 
         // 四元数与相对角反馈
         float current_chassis_pitch_rad{0};
-        float chassis_yaw_imu{
-            0}; // 基于四元数解算的底盘绝对航向(用于计算IMU动态限幅)
+        float chassis_yaw_imu{0};
+        float chassis_pitch_rad{0};
         float chassis_q[4]{};
         float gimbal_q[4]{};
         float relative_pitch_rad{0};
         float relative_roll_rad{0};
-        float relative_yaw_motor_rad{0};   // 6020反馈计算得到(机械相对角)
-        float relative_yaw_motor_radps{0}; // 6020反馈速度(机械相对角速度)
+        float relative_yaw_motor_rad{0};
+        float relative_yaw_motor_wrapped_rad{0};
+        float relative_yaw_motor_radps{0};
 
         // 目标与误差
         float target_pitch_rad{0};
         float target_pitch_radps{0};
         float target_yaw_rad{0};
         float target_yaw_radps{0};
-        float yaw_error_rad{0}; // IMU 偏航角最短路径误差
+        float yaw_error_rad{0};
 
-        float target_relative_yaw_rad{0}; // 吊射模式专用的相对目标角
-        float relative_yaw_error_rad{0};  // 吊射模式专用的相对误差
+        float target_relative_yaw_rad{0};
+        float relative_yaw_error_rad{0};
 
         // 输出
         float out_pitch_torque{0};
         float out_yaw_torque{0};
+
+        // 调试用
+        float pos_imu_leso_z1;
+        float spd_imu_leso_z0;
+        float pos_leso_z0;
+        float pos_leso_z1;
+        float pos_leso_out;
+        float spd_leso_z0;
     };
 
     // 总 Context

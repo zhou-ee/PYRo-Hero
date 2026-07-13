@@ -3,7 +3,5 @@
 
 #include "pyro_core_config.h"
 
-#define DR16_UART PYRO_UART5
-#define VT03_UART PYRO_UART1
 
 #endif
