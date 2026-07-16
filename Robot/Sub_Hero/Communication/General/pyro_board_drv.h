@@ -7,8 +7,10 @@
 #define PYRO_BOARD_DRV_H
 
 #include "pyro_can_drv.h"
+#include "pyro_bsp_can.h"
 #include "pyro_core_def.h"
 #include "pyro_task.h"
+#include <array>
 #include <cstdint>
 
 namespace pyro
@@ -100,8 +102,8 @@ class board_drv_t
     static constexpr uint8_t C2G_FRAME_CNT    = (sizeof(c2g_data_t) + 7) / 8;
 
     static board_drv_t &
-    get_instance(role_t role                 = role_t::GIMBAL,
-                 can_hub_t::which_can can_ch = can_hub_t::can1);
+    get_instance(role_t role                    = role_t::GIMBAL,
+                 bsp_can::which_can can_ch      = bsp_can::can1);
 
     void start_rx() const;
 
@@ -146,7 +148,7 @@ class board_drv_t
     }
 
   private:
-    explicit board_drv_t(role_t role, can_hub_t::which_can can_ch);
+    explicit board_drv_t(role_t role, bsp_can::which_can can_ch);
     ~board_drv_t();
 
     // 隐藏的底层 raw 接口，避免头文件被 CAN 驱动污染
@@ -173,8 +175,15 @@ class board_drv_t
     };
 
     role_t _role;
-    can_hub_t::which_can _can_ch;
+    bsp_can::which_can _can_ch;
     board_task_t *_task;
+
+    // 缓存 CAN 驱动对象指针
+    can_drv_t *_can_drv;
+
+    // CAN 消息接收缓冲区（最多支持 4 个 ID 同时监听）
+    static constexpr uint8_t MAX_RX_BUF = 4;
+    std::array<can_msg_buffer_t *, MAX_RX_BUF> _rx_bufs{};
 
     g2c_data_t _g2c_tx_payload{};
     c2g_data_t _c2g_tx_payload{};
@@ -184,7 +193,7 @@ class board_drv_t
     bool _is_online;
     float _last_rx_time_ms;
 
-    void init_impl() const;
+    void init_impl();
     void run_loop_impl();
 };
 

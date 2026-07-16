@@ -52,7 +52,7 @@ extern "C"
     void hero_chassis_init(void *argument)
     {
         board_drv_ptr = &board_drv_t::get_instance(board_drv_t::role_t::CHASSIS,
-                                                   can_hub_t::can2);
+                                                   bsp_can::can2);
         mec_cmd_ptr     = new pyro::mec_cmd_t();
         mec_chassis_ptr = pyro::mec_chassis_t::instance();
 
@@ -87,19 +87,19 @@ void deps_init()
 
     mec_deps_ptr->motor_deps.wheels[0] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_1,
-                                        pyro::can_hub_t::can1);
+                                        pyro::bsp_can::can1);
     mec_deps_ptr->motor_deps.wheels[1] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_2,
-                                        pyro::can_hub_t::can1);
+                                        pyro::bsp_can::can1);
     mec_deps_ptr->motor_deps.wheels[2] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_3,
-                                        pyro::can_hub_t::can1);
+                                        pyro::bsp_can::can1);
     mec_deps_ptr->motor_deps.wheels[3] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_4,
-                                        pyro::can_hub_t::can1);
+                                        pyro::bsp_can::can1);
 
     mec_deps_ptr->motor_deps.yaw = new pyro::dji_gm_6020_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_2, pyro::can_hub_t::can2);
+        pyro::dji_motor_tx_frame_t::id_2, pyro::bsp_can::can2);
 
     for (auto *&pid : mec_deps_ptr->pid_deps.wheel_pid)
     {

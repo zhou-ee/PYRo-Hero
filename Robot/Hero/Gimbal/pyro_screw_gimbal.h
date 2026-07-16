@@ -81,62 +81,8 @@ struct screw_gimbal_deps_t
     pid_deps_t pid_deps{};
 };
 
-// =========================================================
-// 2. 云台类
-// =========================================================
-class screw_gimbal_t final
-    : public module_base_t<screw_gimbal_t, screw_gimbal_cmd_t,
-                           screw_gimbal_deps_t>
-{
-    friend class module_base_t;
-
-    struct motor_ctx_t;
-    struct pid_ctx_t;
-    struct data_ctx_t;
-    struct gimbal_context_t;
-
-  public:
-    [[nodiscard]] gimbal_context_t& get_ctx();
-
-  private:
-    screw_gimbal_t();
-    ~screw_gimbal_t() override = default;
-
-    // --- 基类接口实现 ---
-    status_t _init() override;
-    void _update_feedback() override;
-    void _fsm_execute() override;
-
-    // --- 私有辅助方法 ---
-    void _gimbal_control();
-    void _gimbal_autoaim_control();
-    void _gimbal_sling_control();
-    static void _send_motor_command(gimbal_context_t *ctx);
-    void _communicate_chassis();
-    void _calculate_relative_angles();
-    void _handle_dynamic_calibration();
-    void _apply_yaw_relative_limit();
-
-    // --- 核心运动学 (纯数学模型，需外部传入任意角度解算) ---
-    bool _calibrate_pitch_offset();
-    float _pitch_rad_to_motor_rad(float pitch_rad) const;
-    float _motor_rad_to_pitch_rad(float motor_rad) const;
-    float _get_motor_to_pitch_jacobian(float pitch_rad) const;
-
-    // --- 业务控制逻辑 (无参化，完全依赖 _ctx.data 内部状态) ---
-    float _calculate_pitch_compensation(bool is_autoaim) const;
-
-    // --- 成员变量 ---
-
-    uint32_t _calib_tick{0};
-    float _calib_pitch_sum{0.0f};
-
-    // 动态校准计时与均值缓存
-    uint32_t _dynamic_calib_timer{0};
-    float _dynamic_calib_sum{0.0f};
-
     // 运行时数据
-    struct data_ctx_t
+    struct gimbal_data_ctx_t
     {
         bool is_calibrating{false};
         bool has_initial_calibrated{false};
@@ -210,11 +156,68 @@ class screw_gimbal_t final
     {
         screw_gimbal_deps_t::motor_deps_t motor;
         screw_gimbal_deps_t::pid_deps_t pid;
-        data_ctx_t data;
+        gimbal_data_ctx_t data;
         screw_gimbal_cmd_t *cmd{};
     };
 
-    gimbal_context_t _ctx;
+
+
+struct screw_gimbal_moduleparams
+{
+    using CmdType    = screw_gimbal_cmd_t;
+    using ModuleDeps = screw_gimbal_deps_t;
+    using ModuleCtx  = gimbal_context_t;
+};
+// ====================================
+// =====================
+// 2. 云台类
+// =========================================================
+class screw_gimbal_t final
+    : public module_base_t<screw_gimbal_t,screw_gimbal_moduleparams>
+{
+    friend class module_base_t<screw_gimbal_t,screw_gimbal_moduleparams>;
+
+
+  public:
+
+
+  private:
+    screw_gimbal_t();
+    ~screw_gimbal_t() override = default;
+
+    // --- 基类接口实现 ---
+    status_t _init() override;
+    void _update_feedback() override;
+    void _fsm_execute() override;
+
+    // --- 私有辅助方法 ---
+    void _gimbal_control();
+    void _gimbal_autoaim_control();
+    void _gimbal_sling_control();
+    static void _send_motor_command(gimbal_context_t *ctx);
+    void _communicate_chassis();
+    void _calculate_relative_angles();
+    void _handle_dynamic_calibration();
+    void _apply_yaw_relative_limit();
+
+    // --- 核心运动学 (纯数学模型，需外部传入任意角度解算) ---
+    bool _calibrate_pitch_offset();
+    float _pitch_rad_to_motor_rad(float pitch_rad) const;
+    float _motor_rad_to_pitch_rad(float motor_rad) const;
+    float _get_motor_to_pitch_jacobian(float pitch_rad) const;
+
+    // --- 业务控制逻辑 (无参化，完全依赖 _ctx.data 内部状态) ---
+    float _calculate_pitch_compensation(bool is_autoaim) const;
+
+    // --- 成员变量 ---
+
+    uint32_t _calib_tick{0};
+    float _calib_pitch_sum{0.0f};
+
+    // 动态校准计时与均值缓存
+    uint32_t _dynamic_calib_timer{0};
+    float _dynamic_calib_sum{0.0f};
+
 
     // =====================================================
     // 状态定义 (HFSM)

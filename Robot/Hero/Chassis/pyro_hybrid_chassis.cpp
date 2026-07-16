@@ -55,10 +55,6 @@ status_t hybrid_chassis_t::_init()
     return PYRO_OK;
 }
 
-hybrid_chassis_t::hybrid_context_t &hybrid_chassis_t::get_ctx()
-{
-    return _ctx;
-}
 
 
 void hybrid_chassis_t::_power_control_init()

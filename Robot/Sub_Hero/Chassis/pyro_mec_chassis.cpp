@@ -34,7 +34,7 @@ status_t mec_chassis_t::_init()
 
     _kinematics = new mecanum_kin_t(WHEELBASE, TRACK_WIDTH);
 
-    _ctx.powermeter = new powermeter_drv_t(0x212, can_hub_t::can2);
+    _ctx.powermeter = new powermeter_drv_t(0x212, bsp_can::can2);
     _ctx.powermeter->init();
 
     _power_control_init();
@@ -42,7 +42,7 @@ status_t mec_chassis_t::_init()
     return PYRO_OK;
 }
 
-mec_chassis_t::mec_context_t &mec_chassis_t::get_ctx()
+MecChassisModuleParams::ModuleCtx mec_chassis_t::get_ctx()
 {
     return _ctx;
 }

@@ -4,9 +4,7 @@
 #include "pyro_vt03_rc_drv.h"
 #include "pyro_rc_base_drv.h"
 #include "pyro_quad_booster.h"
-#include "pyro_com_cantx.h"
 #include "pyro_quad_booster.h"
-#include "pyro_com_canrx.h"
 #include "pyro_autoaim_drv.h"
 #include "pyro_board_drv.h"
 #include "pyro_dm_motor_drv.h"
@@ -284,15 +282,15 @@ void deps_init()
 {
     quad_deps_ptr                            = new pyro::quad_deps_t();
     quad_deps_ptr->motor_deps.fric_wheels[0] = new pyro::dji_m3508_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_1, pyro::can_hub_t::can2);
+        pyro::dji_motor_tx_frame_t::id_1, pyro::bsp_can::can2);
     quad_deps_ptr->motor_deps.fric_wheels[1] = new pyro::dji_m3508_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_2, pyro::can_hub_t::can2);
+        pyro::dji_motor_tx_frame_t::id_2, pyro::bsp_can::can2);
     quad_deps_ptr->motor_deps.fric_wheels[2] = new pyro::dji_m3508_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_3, pyro::can_hub_t::can2);
+        pyro::dji_motor_tx_frame_t::id_3, pyro::bsp_can::can2);
     quad_deps_ptr->motor_deps.fric_wheels[3] = new pyro::dji_m3508_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_4, pyro::can_hub_t::can2);
+        pyro::dji_motor_tx_frame_t::id_4, pyro::bsp_can::can2);
     quad_deps_ptr->motor_deps.trigger_wheel =
-        new pyro::dm_motor_drv_t(0x51, 0x61, pyro::can_hub_t::can1);
+        new pyro::dm_motor_drv_t(0x51, 0x61, pyro::bsp_can::can1);
 
     static_cast<dm_motor_drv_t *>(quad_deps_ptr->motor_deps.trigger_wheel)
         ->set_position_range(-PI, PI);

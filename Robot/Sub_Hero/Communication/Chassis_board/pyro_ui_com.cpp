@@ -1,8 +1,8 @@
 #include "pyro_ui_com.h"
 
 #include "pyro_board_drv.h"
+#include "pyro_bsp_can.h"
 #include "pyro_can_drv.h"
-#include "pyro_com_canrx.h"
 #include "pyro_core_def.h"
 #include "pyro_mec_chassis.h"
 #include "pyro_module_base.h"
@@ -642,7 +642,6 @@ extern "C"
 
     void hero_ui_init(void *argument)
     {
-        pyro::can_rx_drv_t::subscribe(can_hub_t::can2, 0x110);
         referee_ptr = pyro::referee_drv_t::get_instance();
         ui_ptr      = new pyro::ui_drv_t(referee_ptr);
 

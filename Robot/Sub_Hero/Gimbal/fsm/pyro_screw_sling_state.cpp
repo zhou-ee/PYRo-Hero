@@ -1,7 +1,7 @@
 #include "pyro_screw_gimbal.h"
 #include "screw_config.h"
-#include "pyro_algo_common.h"
 #include "pyro_board_drv.h"
+#include "pyro_quad_booster.h"
 #include <algorithm>
 
 namespace pyro
@@ -53,7 +53,7 @@ void screw_gimbal_t::fsm_active_t::sling_state_t::execute(owner *owner)
 
     // 执行纯机械角控制与发送指令
     owner->_gimbal_sling_control();
-    screw_gimbal_t::_send_motor_command(&owner->_ctx);
+    owner->screw_gimbal_t::_send_motor_command();
 }
 
 void screw_gimbal_t::fsm_active_t::sling_state_t::exit(owner *owner)

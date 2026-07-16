@@ -58,7 +58,7 @@ void screw_gimbal_t::fsm_active_t::autoaim_state_t::execute(owner *owner)
     // 3. 执行自瞄专用的绝对角度闭环控制并发送指令
     // ==========================================
     owner->_gimbal_autoaim_control();
-    _send_motor_command(&owner->_ctx);
+    owner->_send_motor_command();
 }
 
 void screw_gimbal_t::fsm_active_t::autoaim_state_t::exit(owner *owner)

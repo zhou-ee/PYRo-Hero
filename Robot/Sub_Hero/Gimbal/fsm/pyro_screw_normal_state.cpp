@@ -43,7 +43,7 @@ void screw_gimbal_t::fsm_active_t::normal_state_t::execute(owner *owner)
     // 底层的 _gimbal_control 算误差时自带了 loop_fp32_constrain，所以步骤 f 给出的数据完全合法
     // ==========================================
     owner->_gimbal_control();
-    _send_motor_command(&owner->_ctx);
+    owner->_send_motor_command();
 }
 
 void screw_gimbal_t::fsm_active_t::normal_state_t::exit(owner *owner)

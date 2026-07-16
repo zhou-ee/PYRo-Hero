@@ -1,3 +1,4 @@
+#include "pyro_bsp_can.h"
 #include "pyro_bsp_uart.h"
 #include "pyro_can_drv.h"
 #include "pyro_dr16_rc_drv.h"
@@ -25,18 +26,18 @@ extern "C"
     {
         dwt_drv_t::init(480); // Initialize DWT at 480 MHz
 
-        can1_drv = new can_drv_t(&hfdcan1);
-        can2_drv = new can_drv_t(&hfdcan2);
-        can3_drv = new can_drv_t(&hfdcan3);
-        can1_drv->init();
-        can2_drv->init();
-        can3_drv->init();
-        can1_drv->start(); // NOLINT
-        can2_drv->start(); // NOLINT
-        can3_drv->start(); // NOLINT
+        bsp_can::init_all();
+        bsp_can::get_can1().start();
+        bsp_can::get_can2().start();
+        bsp_can::get_can3().start();
 
+        can1_drv = &bsp_can::get_can1();
+        can2_drv = &bsp_can::get_can2();
+        can3_drv = &bsp_can::get_can3();
+
+        ins_config_t ins_cfg{};
         ins_drv = ins_drv_t::get_instance();
-        ins_drv->init();
+        ins_drv->init(ins_cfg);
 
 #ifdef DR16_UART
         dr16_drv_t::instance().start();

@@ -83,7 +83,7 @@ extern "C"
     void hero_board_com_init(void *argument)
     {
         board_drv_ptr = &board_drv_t::get_instance(board_drv_t::role_t::CHASSIS,
-                                                   can_hub_t::can2);
+                                                   bsp_can::can2);
         board_drv_ptr->start_rx();
 
         xTaskCreate(hero_board_com_thread, "board_com_app", 256, nullptr,
