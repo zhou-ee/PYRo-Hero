@@ -1,16 +1,20 @@
 #include "pyro_can_drv.h"
 #include "main.h"
 #include <cstring>
-
+// 定义 CAN 中断标志宏（直接复制过来）
+#define CAN_NOTIFY_FLAGS_VAL (FDCAN_IT_RX_FIFO0_NEW_MESSAGE | \
+FDCAN_IT_RX_FIFO0_FULL | \
+FDCAN_IT_RX_FIFO0_MESSAGE_LOST | \
+FDCAN_IT_ERROR_WARNING | \
+FDCAN_IT_ERROR_PASSIVE | \
+FDCAN_IT_BUS_OFF | \
+FDCAN_IT_ARB_PROTOCOL_ERROR | \
+FDCAN_IT_DATA_PROTOCOL_ERROR)
 namespace pyro
 {
 namespace
 {
-constexpr uint32_t CAN_NOTIFY_FLAGS =
-    FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO0_FULL |
-    FDCAN_IT_RX_FIFO0_MESSAGE_LOST | FDCAN_IT_ERROR_WARNING |
-    FDCAN_IT_ERROR_PASSIVE | FDCAN_IT_BUS_OFF |
-    FDCAN_IT_ARB_PROTOCOL_ERROR | FDCAN_IT_DATA_PROTOCOL_ERROR;
+
 
 void abort_pending_tx(FDCAN_HandleTypeDef *hfdcan)
 {
@@ -24,7 +28,7 @@ void abort_pending_tx(FDCAN_HandleTypeDef *hfdcan)
 
 status_t reactivate_can_notifications(FDCAN_HandleTypeDef *hfdcan)
 {
-    if (HAL_OK != HAL_FDCAN_ActivateNotification(hfdcan, CAN_NOTIFY_FLAGS, 0))
+    if (HAL_OK != HAL_FDCAN_ActivateNotification(hfdcan, CAN_NOTIFY_FLAGS_VAL, 0))
         return PYRO_ERROR;
 
     return PYRO_OK;

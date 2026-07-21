@@ -47,7 +47,7 @@ status_t hybrid_chassis_t::_init()
     // _kinematics = new hybrid_kin_t(TRACK_SPACING,
     //                            0.15f + x,0.15f + x,0.66f - x, 0.66f - x);
 
-    _ctx.powermeter = new powermeter_drv_t(0x212, can_hub_t::can2);
+    _ctx.powermeter = new powermeter_drv_t(0x212, bsp_can::can2);
     _ctx.powermeter->init();
 
     _power_control_init();
@@ -55,10 +55,6 @@ status_t hybrid_chassis_t::_init()
     return PYRO_OK;
 }
 
-hybrid_chassis_t::hybrid_context_t &hybrid_chassis_t::get_ctx()
-{
-    return _ctx;
-}
 
 
 void hybrid_chassis_t::_power_control_init()
@@ -814,8 +810,8 @@ void hybrid_chassis_t::_track_control()
         _ctx.data.out_track_torque[i] = _ctx.pid.track_pid[i]->calculate(
             _ctx.data.target_track_rpm[i], _ctx.data.current_track_rpm[i]);
     }
-    // _ctx.data.out_track_torque[0] = 0;
-    // _ctx.data.out_track_torque[1] = 0;
+     //_ctx.data.out_track_torque[0] = 0;
+     //_ctx.data.out_track_torque[1] = 0;
 }
 
 void hybrid_chassis_t::_send_motor_command() const

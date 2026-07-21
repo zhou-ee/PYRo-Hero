@@ -1,3 +1,4 @@
+#include "pyro_bsp_can.h"
 #include "pyro_bsp_uart.h"
 #include "pyro_can_drv.h"
 #include "pyro_dr16_rc_drv.h"
@@ -15,28 +16,33 @@ namespace pyro
 {
 extern "C"
 {
-    can_drv_t *can1_drv;
-    can_drv_t *can2_drv;
-    can_drv_t *can3_drv;
-    ins_drv_t *ins_drv;
-
+    can_drv_t *can1_drv = nullptr;
+    can_drv_t *can2_drv = nullptr;
+    can_drv_t *can3_drv = nullptr;
+    ins_drv_t *ins_drv  = nullptr;
 
     void pyro_init_thread(void *argument)
     {
         dwt_drv_t::init(480); // Initialize DWT at 480 MHz
 
-        can1_drv = new can_drv_t(&hfdcan1);
-        can2_drv = new can_drv_t(&hfdcan2);
-        can3_drv = new can_drv_t(&hfdcan3);
-        can1_drv->init();
-        can2_drv->init();
-        can3_drv->init();
-        can1_drv->start(); // NOLINT
-        can2_drv->start(); // NOLINT
-        can3_drv->start(); // NOLINT
+        // 初始化所有 CAN
+        bsp_can::init_all();
 
+        // （可选）保存指针供外部使用（如果需要）
+        can1_drv = &bsp_can::get_can1();
+        can2_drv = &bsp_can::get_can2();
+        can3_drv = &bsp_can::get_can3();
+
+        // 初始化 INS
         ins_drv = ins_drv_t::get_instance();
-        ins_drv->init();
+        ins_config_t config{};
+        config.direct = ins_config_t::imu_direct_t::DIRECT_1;  // 根据实际安装方向调整
+        config.calibrate = false;                              // 首次使用可设为 true 校准
+        config.gx_offset = 0.0f;
+        config.gy_offset = 0.0f;
+        config.gz_offset = 0.0f;
+        config.g_norm = 9.80665f;
+        ins_drv->init(config);
 
 #ifdef DR16_UART
         dr16_drv_t::instance().start();
@@ -111,7 +117,6 @@ extern "C"
         sr05_drv::get_instance().init();
         sr05_drv::get_instance().start();
 #endif
-
 
         vTaskDelete(nullptr);
     }

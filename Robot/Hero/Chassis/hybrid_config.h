@@ -53,7 +53,7 @@ constexpr float TAU_GRAVITY_COEF[TAU_GRAVITY_DEGREE + 1] = {
     -1.4132, 4.2032, -5.0430, 3.7907, -3.3777};
 constexpr float K_TAU_GRAVITY = 1.0f;    // 自重补偿系数
 constexpr float MASS          = 25.5f;   // 机器人质量 (kg)
-constexpr float GRAVITY       = gNORM;   // 重力加速度 (m/s^2)
+constexpr float GRAVITY       = 9.81;   // 重力加速度 (m/s^2)
 constexpr float DIST_FRONT    = 0.2395f; // 质心到前轴距离 (m)
 constexpr float DIST_HIP      = 0.1805f; // 质心到髋关节的水平距离
 constexpr float H_COG         = 0.18f;   // 重心垂直高度

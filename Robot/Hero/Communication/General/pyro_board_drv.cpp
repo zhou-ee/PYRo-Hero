@@ -3,10 +3,13 @@
  */
 
 #include "pyro_board_drv.h"
-#include "pyro_com_canrx.h"
-#include "pyro_com_cantx.h"
+
+#include "pyro_can_drv.h"
+#include "pyro_bsp_can.h"
+
 #include "pyro_dwt_drv.h"
 #include <cstring>
+#include <algorithm>  // for std::min
 
 namespace pyro
 {
@@ -30,16 +33,19 @@ void board_drv_t::board_task_t::run_loop()
 }
 
 board_drv_t &board_drv_t::get_instance(const role_t role,
-                                       const can_hub_t::which_can can_ch)
+                                       const bsp_can::which_can can_ch)
 {
     static board_drv_t instance(role, can_ch);
     return instance;
 }
 
-board_drv_t::board_drv_t(const role_t role, const can_hub_t::which_can can_ch)
+board_drv_t::board_drv_t(const role_t role, const bsp_can::which_can can_ch)
     : _role(role), _can_ch(can_ch), _task(nullptr), _is_online(false),
       _last_rx_time_ms(0.0f)
 {
+    for (auto &buf : _g2c_buffers) buf = nullptr;
+    for (auto &buf : _c2g_buffers) buf = nullptr;
+    for (auto &buf : _event_buffers) buf = nullptr;
     _task = new board_task_t(this);
 }
 
@@ -50,6 +56,10 @@ board_drv_t::~board_drv_t()
         _task->stop();
         delete _task;
     }
+    // 清理动态分配的 buffer（可选）
+    for (auto &buf : _g2c_buffers) delete buf;
+    for (auto &buf : _c2g_buffers) delete buf;
+    for (auto &buf : _event_buffers) delete buf;
 }
 
 void board_drv_t::start_rx() const
@@ -58,25 +68,34 @@ void board_drv_t::start_rx() const
         _task->start();
 }
 
-void board_drv_t::init_impl() const
+void board_drv_t::init_impl()
 {
+    can_drv_t* can_drv = bsp_can::get_can(_can_ch);
+    if (!can_drv) return;
+
     if (_role == role_t::CHASSIS)
     {
-        // 底盘：订阅云台周期包 (以及后续可能的 G2C 事件)
         for (uint8_t i = 0; i < G2C_FRAME_CNT; ++i)
-            can_rx_drv_t::subscribe(_can_ch, G2C_BASE_ID + i);
+        {
+            _g2c_buffers[i] = new can_msg_buffer_t(G2C_BASE_ID + i);
+            can_drv->register_rx_msg(_g2c_buffers[i]);
+        }
     }
-    else
+    else // GIMBAL
     {
-        // 云台：订阅底盘周期包
         for (uint8_t i = 0; i < C2G_FRAME_CNT; ++i)
-            can_rx_drv_t::subscribe(_can_ch, C2G_BASE_ID + i);
+        {
+            _c2g_buffers[i] = new can_msg_buffer_t(C2G_BASE_ID + i);
+            can_drv->register_rx_msg(_c2g_buffers[i]);
+        }
 
-        // 云台：单独订阅底盘发弹事件所需的 ID 数量
         const auto shoot_cnt =
             static_cast<uint8_t>((sizeof(event_shoot_t) + 7) / 8);
         for (uint8_t i = 0; i < shoot_cnt; ++i)
-            can_rx_drv_t::subscribe(_can_ch, EVENT_C2G_SHOOT + i);
+        {
+            _event_buffers[i] = new can_msg_buffer_t(EVENT_C2G_SHOOT + i);
+            can_drv->register_rx_msg(_event_buffers[i]);
+        }
     }
 }
 
@@ -84,46 +103,42 @@ void board_drv_t::run_loop_impl()
 {
     while (true)
     {
-        std::array<uint8_t, 8> raw_data{};
-        const auto current_time = dwt_drv_t::get_timeline_ms();
+        std::array<uint8_t, 8> raw{};
+        float now = dwt_drv_t::get_timeline_ms();
 
-        // 仅在后台循环中维护高频的周期性数据，维持设备在线状态
         if (_role == role_t::CHASSIS)
         {
-            auto *ptr = reinterpret_cast<uint8_t *>(&_latest_g2c_rx);
+            auto *dst = reinterpret_cast<uint8_t *>(&_latest_g2c_rx);
             for (uint8_t i = 0; i < G2C_FRAME_CNT; ++i)
             {
-                if (can_rx_drv_t::get_data(_can_ch, G2C_BASE_ID + i, raw_data))
-                {
-                    auto copy_len =
-                        static_cast<uint8_t>(sizeof(g2c_data_t) - (i * 8));
-                    if (copy_len > 8)
-                        copy_len = 8;
-                    memcpy(ptr + (i * 8), raw_data.data(), copy_len);
-                    _is_online       = true;
-                    _last_rx_time_ms = current_time;
+                if (_g2c_buffers[i] && _g2c_buffers[i]->is_fresh()) {
+                    _g2c_buffers[i]->get_data(raw);
+                    size_t len = std::min<size_t>(sizeof(g2c_data_t) - i*8, 8);
+                    memcpy(dst + i*8, raw.data(), len);
+                    _is_online = true;
+                    _last_rx_time_ms = now;
+                    _g2c_buffers[i]->mark_read();
                 }
             }
         }
-        else
+        else // GIMBAL
         {
-            auto *ptr = reinterpret_cast<uint8_t *>(&_latest_c2g_rx);
+            // ★ 修复：使用 _latest_c2g_rx，而不是 _latest_g2c_rx
+            auto *dst = reinterpret_cast<uint8_t *>(&_latest_c2g_rx);
             for (uint8_t i = 0; i < C2G_FRAME_CNT; ++i)
             {
-                if (can_rx_drv_t::get_data(_can_ch, C2G_BASE_ID + i, raw_data))
-                {
-                    auto copy_len =
-                        static_cast<uint8_t>(sizeof(c2g_data_t) - (i * 8));
-                    if (copy_len > 8)
-                        copy_len = 8;
-                    memcpy(ptr + (i * 8), raw_data.data(), copy_len);
-                    _is_online       = true;
-                    _last_rx_time_ms = current_time;
+                if (_c2g_buffers[i] && _c2g_buffers[i]->is_fresh()) {
+                    _c2g_buffers[i]->get_data(raw);
+                    size_t len = std::min<size_t>(sizeof(c2g_data_t) - i*8, 8);
+                    memcpy(dst + i*8, raw.data(), len);
+                    _is_online = true;
+                    _last_rx_time_ms = now;
+                    _c2g_buffers[i]->mark_read();
                 }
             }
         }
 
-        if (_is_online && (current_time - _last_rx_time_ms > 100.0f))
+        if (_is_online && (now - _last_rx_time_ms > 100.0f))
         {
             _is_online = false;
         }
@@ -136,23 +151,24 @@ void board_drv_t::run_loop_impl()
 status_t board_drv_t::send_event_raw(const uint32_t event_base_id,
                                      const void *data, const size_t size) const
 {
-    auto *can_obj = can_hub_t::get_instance()->hub_get_can_obj(_can_ch);
-    if (!can_obj || !data)
+    can_drv_t* can_drv = bsp_can::get_can(_can_ch);
+    if (!can_drv || !data)
         return PYRO_ERROR;
 
-    const auto *ptr      = static_cast<const uint8_t *>(data);
+    const auto *ptr = static_cast<const uint8_t *>(data);
     const auto frame_cnt = static_cast<uint8_t>((size + 7) / 8);
 
     for (uint8_t i = 0; i < frame_cnt; ++i)
     {
-        const auto current_id = event_base_id + i;
-        auto send_len         = static_cast<uint8_t>(size - (i * 8));
-        if (send_len > 8)
-            send_len = 8;
+        const uint32_t current_id = event_base_id + i;
+        size_t send_len = size - (i * 8);
+        if (send_len > 8) send_len = 8;
 
-        can_tx_drv_t::clear(current_id);
-        can_tx_drv_t::add_data_raw(current_id, send_len * 8, ptr + (i * 8));
-        can_tx_drv_t::send(current_id, can_obj);
+        uint8_t tx_data[8] = {0};
+        memcpy(tx_data, ptr + (i * 8), send_len);
+
+        status_t ret = can_drv->send_msg(current_id, tx_data);
+        if (ret != PYRO_OK) return ret;
     }
     return PYRO_OK;
 }
@@ -163,27 +179,31 @@ bool board_drv_t::read_event_raw(const uint32_t event_base_id, void *data_out,
     if (!data_out)
         return false;
 
+    // 只支持 EVENT_C2G_SHOOT
+    if (event_base_id != EVENT_C2G_SHOOT)
+        return false;
+
     std::array<uint8_t, 8> raw_data{};
-    bool received_any    = false;
-    auto *ptr            = static_cast<uint8_t *>(data_out);
-    const auto frame_cnt = static_cast<uint8_t>((size + 7) / 8);
+    bool received_any = false;
+    auto *ptr = static_cast<uint8_t *>(data_out);
+    const uint8_t frame_cnt = static_cast<uint8_t>((size + 7) / 8);
 
     for (uint8_t i = 0; i < frame_cnt; ++i)
     {
-        if (can_rx_drv_t::get_data(_can_ch, event_base_id + i, raw_data))
+        if (_event_buffers[i] && _event_buffers[i]->is_fresh())
         {
-            auto copy_len = static_cast<uint8_t>(size - (i * 8));
-            if (copy_len > 8)
-                copy_len = 8;
+            _event_buffers[i]->get_data(raw_data);
+            size_t copy_len = size - (i * 8);
+            if (copy_len > 8) copy_len = 8;
             memcpy(ptr + (i * 8), raw_data.data(), copy_len);
             received_any = true;
+            _event_buffers[i]->mark_read();
         }
     }
     return received_any;
 }
 
-// ======================== 周期数据 Getters & Setters ========================
-// //
+// ======================== 周期数据 Getters & Setters ======================== //
 
 board_drv_t::g2c_data_t &board_drv_t::get_g2c_tx_data()
 {
@@ -208,22 +228,23 @@ bool board_drv_t::check_online() const
 
 status_t board_drv_t::send_data() const
 {
-    auto *can_obj = can_hub_t::get_instance()->hub_get_can_obj(_can_ch);
-    if (!can_obj)
-        return PYRO_ERROR;
+    can_drv_t* can_drv = bsp_can::get_can(_can_ch);
+    if (!can_drv) return PYRO_ERROR;
 
     if (_role == role_t::GIMBAL)
     {
         const auto *ptr = reinterpret_cast<const uint8_t *>(&_g2c_tx_payload);
         for (uint8_t i = 0; i < G2C_FRAME_CNT; ++i)
         {
-            const auto current_id = G2C_BASE_ID + i;
-            auto send_len = static_cast<uint8_t>(sizeof(g2c_data_t) - (i * 8));
-            if (send_len > 8)
-                send_len = 8;
-            can_tx_drv_t::clear(current_id);
-            can_tx_drv_t::add_data_raw(current_id, send_len * 8, ptr + (i * 8));
-            can_tx_drv_t::send(current_id, can_obj);
+            const uint32_t current_id = G2C_BASE_ID + i;
+            size_t send_len = sizeof(g2c_data_t) - (i * 8);
+            if (send_len > 8) send_len = 8;
+
+            uint8_t tx_data[8] = {0};
+            memcpy(tx_data, ptr + (i * 8), send_len);
+
+            status_t ret = can_drv->send_msg(current_id, tx_data);
+            if (ret != PYRO_OK) return ret;
         }
     }
     else // CHASSIS
@@ -231,13 +252,15 @@ status_t board_drv_t::send_data() const
         const auto *ptr = reinterpret_cast<const uint8_t *>(&_c2g_tx_payload);
         for (uint8_t i = 0; i < C2G_FRAME_CNT; ++i)
         {
-            const auto current_id = C2G_BASE_ID + i;
-            auto send_len = static_cast<uint8_t>(sizeof(c2g_data_t) - (i * 8));
-            if (send_len > 8)
-                send_len = 8;
-            can_tx_drv_t::clear(current_id);
-            can_tx_drv_t::add_data_raw(current_id, send_len * 8, ptr + (i * 8));
-            can_tx_drv_t::send(current_id, can_obj);
+            const uint32_t current_id = C2G_BASE_ID + i;
+            size_t send_len = sizeof(c2g_data_t) - (i * 8);
+            if (send_len > 8) send_len = 8;
+
+            uint8_t tx_data[8] = {0};
+            memcpy(tx_data, ptr + (i * 8), send_len);
+
+            status_t ret = can_drv->send_msg(current_id, tx_data);
+            if (ret != PYRO_OK) return ret;
         }
     }
     return PYRO_OK;

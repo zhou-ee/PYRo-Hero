@@ -42,7 +42,7 @@ status_t mec_chassis_t::_init()
     return PYRO_OK;
 }
 
-mec_chassis_t::mec_context_t &mec_chassis_t::get_ctx()
+MecChassisModuleParams::ModuleCtx mec_chassis_t::get_ctx()
 {
     return _ctx;
 }

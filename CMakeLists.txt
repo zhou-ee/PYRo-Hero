@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 
 # 设置机器人ID
+set(ROBOT_ID 1)
 # 包含机器人配置（定义ROBOT_NAME）
 include(${CMAKE_CURRENT_SOURCE_DIR}/CMake/config/pyro_robot_id_config.cmake)
 

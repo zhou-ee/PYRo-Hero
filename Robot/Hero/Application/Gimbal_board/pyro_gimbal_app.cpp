@@ -222,27 +222,27 @@ void gimbal_vt032cmd()
     // --- 新增：判断拨动到 DOWN (右侧) 时进入自瞄状态 ---
     if (pyro::sw_pos_t::DOWN == vrc.switches.gear.current_pos)
     {
-        screw_gimbal_cmd_ptr->autoaim_mode = true;
-
-        if (pyro::autoaim_drv_t::get_instance().check_online())
-        {
-            // 解析并赋值 PC 下发的目标角度
-            const auto &rx_data =
-                pyro::autoaim_drv_t::get_instance().get_target_data();
-            screw_gimbal_cmd_ptr->target_yaw   = rx_data.shoot_yaw;
-            screw_gimbal_cmd_ptr->target_pitch = -rx_data.shoot_pitch;
-            screw_gimbal_cmd_ptr->pitch_delta_angle =
-                -vrc.axes.ry * 0.0025f - vrc.mouse_axes.y * 0.25f;
-            screw_gimbal_cmd_ptr->yaw_delta_angle =
-                -vrc.axes.rx * 0.0025f - vrc.mouse_axes.x * 0.6f;
-        }
-        else
-        {
-            screw_gimbal_cmd_ptr->pitch_delta_angle =
-                -vrc.axes.ry * 0.0025f - vrc.mouse_axes.y * 0.25f;
-            screw_gimbal_cmd_ptr->yaw_delta_angle =
-                -vrc.axes.rx * 0.0025f - vrc.mouse_axes.x * 0.6f;
-        }
+        // screw_gimbal_cmd_ptr->autoaim_mode = true;
+        //
+        // if (pyro::autoaim_drv_t::get_instance().check_online())
+        // {
+        //     // 解析并赋值 PC 下发的目标角度
+        //     const auto &rx_data =
+        //         pyro::autoaim_drv_t::get_instance().get_target_data();
+        //     screw_gimbal_cmd_ptr->target_yaw   = rx_data.shoot_yaw;
+        //     screw_gimbal_cmd_ptr->target_pitch = -rx_data.shoot_pitch;
+        //     screw_gimbal_cmd_ptr->pitch_delta_angle =
+        //         -vrc.axes.ry * 0.0025f - vrc.mouse_axes.y * 0.25f;
+        //     screw_gimbal_cmd_ptr->yaw_delta_angle =
+        //         -vrc.axes.rx * 0.0025f - vrc.mouse_axes.x * 0.6f;
+        // }
+        // else
+        // {
+        //     screw_gimbal_cmd_ptr->pitch_delta_angle =
+        //         -vrc.axes.ry * 0.0025f - vrc.mouse_axes.y * 0.25f;
+        //     screw_gimbal_cmd_ptr->yaw_delta_angle =
+        //         -vrc.axes.rx * 0.0025f - vrc.mouse_axes.x * 0.6f;
+        // }
     }
     else // MID 档位为纯手动控制
     {
@@ -283,12 +283,12 @@ void deps_init()
     // Pitch: 使用 DM 电机 (示例 ID: Master 0x11, Slave 0x21, CAN1)
     // 根据 hybrid 中的用法进行配置
     screw_gimbal_deps->motor_deps.pitch =
-        new dji_m3508_motor_drv_t(dji_motor_tx_frame_t::id_2, can_hub_t::can3);
+        new dji_m3508_motor_drv_t(dji_motor_tx_frame_t::id_2, bsp_can::can3);
 
     // Yaw: 使用 DJI GM6020 (ID 2, CAN1)
 
     screw_gimbal_deps->motor_deps.yaw = new dji_gm_6020_motor_drv_t(
-        dji_motor_tx_frame_t::id_3, can_hub_t::can1);
+        dji_motor_tx_frame_t::id_3, bsp_can::can1);
 
 
     // 3. 初始化串级 PID

@@ -59,7 +59,7 @@ extern "C"
     void hero_chassis_init(void *argument)
     {
         board_drv_ptr = &board_drv_t::get_instance(board_drv_t::role_t::CHASSIS,
-                                                   can_hub_t::can1);
+                                                   bsp_can::can1);
         hybrid_cmd_ptr     = new pyro::hybrid_cmd_t();
         hybrid_chassis_ptr = pyro::hybrid_chassis_t::instance();
 
@@ -98,27 +98,27 @@ void deps_init()
     hybrid_deps_ptr = new pyro::hybrid_deps_t();
     hybrid_deps_ptr->motor_deps.mecanum[0] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_1,
-                                        pyro::can_hub_t::can3); // FL Wheel
+                                        pyro::bsp_can::can3); // FL Wheel
     hybrid_deps_ptr->motor_deps.mecanum[1] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_2,
-                                        pyro::can_hub_t::can3); // FR Wheel
+                                        pyro::bsp_can::can3); // FR Wheel
     hybrid_deps_ptr->motor_deps.mecanum[2] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_3,
-                                        pyro::can_hub_t::can3); // RL Wheel
+                                        pyro::bsp_can::can3); // RL Wheel
     hybrid_deps_ptr->motor_deps.mecanum[3] =
         new pyro::dji_m3508_motor_drv_t(pyro::dji_motor_tx_frame_t::id_4,
-                                        pyro::can_hub_t::can3); // RR Wheel
+                                        pyro::bsp_can::can3); // RR Wheel
     hybrid_deps_ptr->motor_deps.track[0] =
-        new pyro::dm_motor_drv_t(0x11, 0x21, pyro::can_hub_t::can3);
+        new pyro::dm_motor_drv_t(0x11, 0x21, pyro::bsp_can::can3);
     hybrid_deps_ptr->motor_deps.track[1] =
-        new pyro::dm_motor_drv_t(0x12, 0x22, pyro::can_hub_t::can3);
+        new pyro::dm_motor_drv_t(0x12, 0x22, pyro::bsp_can::can3);
     hybrid_deps_ptr->motor_deps.leg[0] =
-        new pyro::dm_motor_drv_t(0x31, 0x41, pyro::can_hub_t::can2);
+        new pyro::dm_motor_drv_t(0x31, 0x41, pyro::bsp_can::can2);
     hybrid_deps_ptr->motor_deps.leg[1] =
-        new pyro::dm_motor_drv_t(0x32, 0x42, pyro::can_hub_t::can2);
+        new pyro::dm_motor_drv_t(0x32, 0x42, pyro::bsp_can::can2);
 
     hybrid_deps_ptr->motor_deps.yaw = new pyro::dji_gm_6020_motor_drv_t(
-        pyro::dji_motor_tx_frame_t::id_3, pyro::can_hub_t::can1);
+        pyro::dji_motor_tx_frame_t::id_3, pyro::bsp_can::can1);
 
     // NOLINTBEGIN(cppcoreguidelines-pro-type-static-cast-downcast)
     static_cast<dm_motor_drv_t *>(hybrid_deps_ptr->motor_deps.track[0])

@@ -9,6 +9,7 @@
 #include "pyro_can_drv.h"
 #include "pyro_core_def.h"
 #include "pyro_task.h"
+#include "pyro_bsp_can.h"
 #include <cstdint>
 
 namespace pyro
@@ -102,7 +103,7 @@ class board_drv_t
 
     static board_drv_t &
     get_instance(role_t role                 = role_t::GIMBAL,
-                 can_hub_t::which_can can_ch = can_hub_t::can1);
+                 bsp_can::which_can can_ch = bsp_can::can1);
 
     void start_rx() const;
 
@@ -147,7 +148,10 @@ class board_drv_t
     }
 
   private:
-    explicit board_drv_t(role_t role, can_hub_t::which_can can_ch);
+    can_msg_buffer_t* _g2c_buffers[G2C_FRAME_CNT];
+    can_msg_buffer_t* _c2g_buffers[C2G_FRAME_CNT];
+    can_msg_buffer_t* _event_buffers[8];
+    explicit board_drv_t(role_t role, bsp_can::which_can can_ch);
     ~board_drv_t();
 
     // 隐藏的底层 raw 接口，避免头文件被 CAN 驱动污染
@@ -174,7 +178,7 @@ class board_drv_t
     };
 
     role_t _role;
-    can_hub_t::which_can _can_ch;
+    bsp_can::which_can _can_ch;
     board_task_t *_task;
 
     g2c_data_t _g2c_tx_payload{};
@@ -185,7 +189,7 @@ class board_drv_t
     bool _is_online;
     float _last_rx_time_ms;
 
-    void init_impl() const;
+    void init_impl() ;
     void run_loop_impl();
 };
 

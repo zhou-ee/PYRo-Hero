@@ -65,51 +65,7 @@ struct hybrid_deps_t
     pid_deps_t pid_deps{};
 };
 
-// =========================================================
-// 2. 混合底盘类
-// =========================================================
-class hybrid_chassis_t final
-    : public module_base_t<hybrid_chassis_t, hybrid_cmd_t, hybrid_deps_t>
-{
-    friend class module_base_t<hybrid_chassis_t, hybrid_cmd_t, hybrid_deps_t>;
-
-    friend class jcom_drv_t;
-
-    struct motor_deps_t;
-    struct pid_deps_t;
-    struct data_ctx_t;
-    struct hybrid_context_t;
-
-  public:
-    hybrid_chassis_t(const hybrid_chassis_t &)            = delete;
-    hybrid_chassis_t &operator=(const hybrid_chassis_t &) = delete;
-
-    hybrid_context_t& get_ctx();
-
-  private:
-    hybrid_chassis_t();
-    ~hybrid_chassis_t() override = default;
-
-    // --- 基类接口 ---
-    status_t _init() override;
-    void _update_feedback() override;
-    void _fsm_execute() override;
-
-    // --- 派生方法 ---
-    void _power_control_init();
-    void _kinematics_solve();
-    void _supercap_control();
-    void _power_control();
-    void _mecanum_control();
-    void _track_control();
-    void _leg_vmc();
-    void _leg_length_control();
-    void _calibrate_leg_offsets();
-    void _send_motor_command() const;
-    hybrid_kin_t *_kinematics{nullptr};
-
-    // 运行时数据
-    struct data_ctx_t
+    struct gimbal_data_ctx_t
     {
         bool wheel_online[4]{};
         float current_wheel_rpm[4]{};
@@ -169,7 +125,7 @@ class hybrid_chassis_t final
     {
         hybrid_deps_t::motor_deps_t motor;
         hybrid_deps_t::pid_deps_t pid;
-        data_ctx_t data;
+        gimbal_data_ctx_t data;
         powermeter_drv_t *powermeter{nullptr};
         powermeter_data powermeter_feedback{};
         supercap_drv_t::chassis_cmd_t supercap_cmd{};
@@ -178,8 +134,52 @@ class hybrid_chassis_t final
         hybrid_cmd_t *cmd{};
     };
 
-    // 总 Context
-    hybrid_context_t _ctx;
+struct hybrid_chassis_moduleparams
+{
+    using CmdType    = hybrid_cmd_t;
+    using ModuleDeps = hybrid_deps_t;
+    using ModuleCtx  = hybrid_context_t;
+};
+// =========================================================
+// 2. 混合底盘类
+// =========================================================
+class hybrid_chassis_t final
+    : public module_base_t<hybrid_chassis_t,hybrid_chassis_moduleparams>
+{
+    friend class module_base_t<hybrid_chassis_t, hybrid_chassis_moduleparams>;
+
+    friend class jcom_drv_t;
+
+
+  public:
+    hybrid_chassis_t(const hybrid_chassis_t &)            = delete;
+    hybrid_chassis_t &operator=(const hybrid_chassis_t &) = delete;
+
+
+  private:
+    hybrid_chassis_t();
+    ~hybrid_chassis_t() override = default;
+
+    // --- 基类接口 ---
+    status_t _init() override;
+    void _update_feedback() override;
+    void _fsm_execute() override;
+
+    // --- 派生方法 ---
+    void _power_control_init();
+    void _kinematics_solve();
+    void _supercap_control();
+    void _power_control();
+    void _mecanum_control();
+    void _track_control();
+    void _leg_vmc();
+    void _leg_length_control();
+    void _calibrate_leg_offsets();
+    void _send_motor_command() const;
+    hybrid_kin_t *_kinematics{nullptr};
+
+    // 运行时数据
+
     bool _last_leg_calibration_flag{false};
 
     // =====================================================

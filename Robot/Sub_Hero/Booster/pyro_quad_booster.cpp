@@ -424,9 +424,4 @@ void quad_booster_t::_send_trigger_command() const
     _ctx.motor.trigger_wheel->send_torque(_ctx.data.out_trig_torque);
 }
 
-quad_booster_t::booster_ctx_t &quad_booster_t::get_ctx()
-{
-    return _ctx;
-}
-
 } // namespace pyro

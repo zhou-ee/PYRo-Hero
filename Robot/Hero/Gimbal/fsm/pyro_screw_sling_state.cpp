@@ -1,6 +1,6 @@
 #include "pyro_screw_gimbal.h"
 #include "screw_config.h"
-#include "pyro_algo_common.h"
+#include "../../Robot/pyro_algo_solvepitch.h"
 #include "pyro_board_drv.h"
 
 #include <algorithm>
@@ -53,7 +53,7 @@ void screw_gimbal_t::fsm_active_t::sling_state_t::execute(owner *owner)
             delta_x = std::fabs(target_x - robot_x);
             delta_y = std::fabs(target_y - robot_y);
         }
-        if (auto pitch = solveIdealPitch(delta_x, delta_y, delta_z, 16.3f))
+        if (auto pitch = pyro::kinematics::solveIdealPitch(delta_x, delta_y, delta_z, 16.3f))
         {
             float imu_target_pitch = -*pitch;
             float err = owner->_ctx.data.current_pitch_motor_rad - owner->_ctx.data.pitch_imu_rad;

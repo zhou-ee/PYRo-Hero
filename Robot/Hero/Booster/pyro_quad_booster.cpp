@@ -4,13 +4,19 @@
 #include "pyro_board_drv.h"
 #include "pyro_dwt_drv.h"
 #include "pyro_referee.h"
-
+#include "fric_leso+p_controller/pyro_leso_fric_controller.h"
 #include <cmath>
 #include "quad_config.h"
 #include <algorithm>
 
+//leso+p控制器开关
+bool use_leso_p_controller = true;
+
+
 namespace pyro
 {
+
+
 
 quad_booster_t::quad_booster_t() : module_base_t("quad_booster")
 {
@@ -21,6 +27,42 @@ status_t quad_booster_t::_init()
     _ctx.motor = _module_deps.motor_deps;
     _ctx.pid   = _module_deps.pid_deps;
     _ctx.pid.ball_speed_pid = new pid_t(0.4f, 0.002f, 0.005f, 0.01f, 2.0f);
+
+    if (use_leso_p_controller)
+    {
+        // =========================================================
+        // 4 个摩擦轮独立配置
+        // =========================================================
+        fric_leso_config_t config;
+        constexpr float J_MOTOR     = 1e-6;         //转子 转动惯量 kg·m²
+        constexpr float J_35A       = 1.01143e-4;   //35A 转动惯量 kg·m²
+        constexpr float J_40A       = 3.1871e-5;    //40A 转动惯量 kg·m²
+        constexpr float RATIO    = (J_MOTOR+J_35A)/(J_MOTOR+J_40A);
+        constexpr float KP_40A      = 120.0f;       //A
+        constexpr float OMEGA_40A   = 360.0f;       //rad/s
+        constexpr float Z_LIMIT     = 600.0f;       //rad/s²
+        for (int i =0; i < 4; i++)
+        {
+            config.wheel[i].current_max = 20.0f;
+            config.wheel[i].KT = (0.3f/19.0f);
+            if (i == 0 or i == 2)       //40A
+            {
+                config.wheel[i].J          = J_MOTOR+J_40A;
+                config.wheel[i].omega_o    = OMEGA_40A;
+                config.wheel[i].z_limit    = Z_LIMIT;
+                config.wheel[i].kp         = KP_40A;
+            }
+            else                        //35A
+            {
+                config.wheel[i].J          = J_MOTOR+J_35A;
+                config.wheel[i].omega_o    = OMEGA_40A/RATIO;
+                config.wheel[i].z_limit    = Z_LIMIT;
+                config.wheel[i].kp         = KP_40A/RATIO;
+            }
+            config.wheel[i].b0            = config.wheel[i].KT/config.wheel[i].J;
+        }
+        _leso_controller = new fric_leso_controller_t(config);
+    }
 
     return PYRO_OK;
 }
@@ -191,7 +233,7 @@ void quad_booster_t::_speed_control()
 {
     static uint16_t last_launching_num = 0;
     auto &board_drv =
-        board_drv_t::get_instance(board_drv_t::role_t::GIMBAL, can_hub_t::can1);
+        board_drv_t::get_instance(board_drv_t::role_t::GIMBAL, bsp_can::can1);
     board_drv_t::event_shoot_t shoot_event{};
 
 
@@ -299,6 +341,22 @@ void quad_booster_t::_speed_control()
 
 void quad_booster_t::_launch_delay_calculate()
 {
+    static uint8_t deploy_block_counter = 0;
+    constexpr uint8_t DEPLOY_DELAY_BLOCK_MS = 20;
+    constexpr uint8_t DEPLOY_BLOCK_THRESHOLD = DEPLOY_DELAY_BLOCK_MS + 1;
+    if (_ctx.data.deploy_mode == false)
+    {
+        deploy_block_counter = 0;
+    }
+    else
+    {
+        deploy_block_counter++;
+        if (deploy_block_counter < DEPLOY_BLOCK_THRESHOLD)
+        {
+            return;
+        }
+        deploy_block_counter = DEPLOY_BLOCK_THRESHOLD;
+    }
     auto &shoot_data =
         _use_deploy_data() ? _ctx.shoot_deploy_data : _ctx.shoot_normal_data;
 
@@ -341,11 +399,46 @@ void quad_booster_t::_reset_active_shoot_data()
 
 void quad_booster_t::_fric_control()
 {
-    for (int i = 0; i < 4; i++)
+    if (!use_leso_p_controller)
     {
-        _ctx.data.out_fric_torque[i] = _ctx.pid.fric_pid[i]->calculate(
-            _ctx.data.target_fric_mps[i], _ctx.data.current_fric_mps[i]);
+        for (int i = 0; i < 4; i++)
+        {
+            _ctx.data.out_fric_torque[i] = _ctx.pid.fric_pid[i]->calculate(
+                _ctx.data.target_fric_mps[i], _ctx.data.current_fric_mps[i]);
+        }
     }
+    else
+    {
+        if (_leso_controller != nullptr)
+        {
+            // 获取采样周期
+            static uint32_t dwt_cnt = 0;
+            float dt = dwt_drv_t::get_delta_t(&dwt_cnt);
+            // 准备输入输出数组
+            float target[4] = {
+                _ctx.data.target_fric_mps[0] / FRIC2_RADIUS,
+                _ctx.data.target_fric_mps[1] / FRIC1_RADIUS,
+                _ctx.data.target_fric_mps[2] / FRIC2_RADIUS,
+                _ctx.data.target_fric_mps[3] / FRIC1_RADIUS
+            };
+            float feedback[4] = {
+                _ctx.data.current_fric_mps[0] / FRIC2_RADIUS,
+                _ctx.data.current_fric_mps[1] / FRIC1_RADIUS,
+                _ctx.data.current_fric_mps[2] / FRIC2_RADIUS,
+                _ctx.data.current_fric_mps[3] / FRIC1_RADIUS
+            };
+
+            // 计算 LESO 输出(A)
+            float current_cmd[4];
+            _leso_controller->compute(target, feedback,
+                                      current_cmd, dt);
+            for (int i = 0; i < 4; i++)
+            {
+                _ctx.data.out_fric_torque[i] = current_cmd[i];
+            }
+        }
+    }
+
 }
 
 void quad_booster_t::_anti_jam_control()
@@ -412,11 +505,21 @@ void quad_booster_t::_send_fric_command() const
 {
     for (int i = 0; i < 4; i++)
     {
-        _ctx.motor.fric_wheels[i]->send_torque(
-            _ctx.data.out_fric_torque[i] +
-            0.08f * _ctx.data.current_fric_torque[i]);
-        // _ctx.motor.fric_wheels[i]->send_torque(_ctx.data.out_fric_torque[i]);
+        if (use_leso_p_controller)
+        {
+            _ctx.motor.fric_wheels[i]->send_torque(_ctx.data.out_fric_torque[i]);
+        }
+        else
+        {
+            _ctx.motor.fric_wheels[i]->send_torque(
+                    _ctx.data.out_fric_torque[i] +
+                    0.08f * _ctx.data.current_fric_torque[i]);
+            // _ctx.motor.fric_wheels[i]->send_torque(_ctx.data.out_fric_torque[i]);
+
+        }
     }
+
+
 }
 
 void quad_booster_t::_send_raw_fric_command() const
@@ -432,10 +535,6 @@ void quad_booster_t::_send_trigger_command() const
     _ctx.motor.trigger_wheel->send_torque(_ctx.data.out_trig_torque);
 }
 
-quad_booster_t::booster_ctx_t& quad_booster_t::get_ctx()
-{
-    return _ctx;
-}
 
 } // namespace pyro
 

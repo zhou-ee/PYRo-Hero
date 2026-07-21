@@ -296,10 +296,6 @@ void screw_gimbal_t::_handle_dynamic_calibration()
     }
 }
 
-screw_gimbal_t::gimbal_context_t& screw_gimbal_t::get_ctx()
-{
-    return _ctx;
-}
 
 void screw_gimbal_t::_send_motor_command(gimbal_context_t *ctx)
 {
@@ -309,7 +305,7 @@ void screw_gimbal_t::_send_motor_command(gimbal_context_t *ctx)
 
 void screw_gimbal_t::_communicate_chassis()
 {
-    auto &board_drv = board_drv_t::get_instance(board_drv_t::role_t::GIMBAL, can_hub_t::can1);
+    auto &board_drv = board_drv_t::get_instance(board_drv_t::role_t::GIMBAL, bsp_can::can1);
     if (!board_drv.check_online())
     {
         return;
